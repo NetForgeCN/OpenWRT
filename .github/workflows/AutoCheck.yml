@@ -69,7 +69,7 @@ jobs:
             ["diskman"]="sbwml/luci-app-diskman"
             ["honk"]="QiuSimons/luci-app-honk"
             ["dae"]="QiuSimons/luci-app-dae"
-            ["v2ray-geodata"]="lonelysoul/v2ray-geodata"
+            ["v2ray-geodata"]="NetForgeCN/Loyalsoldier"
           )
 
           declare -A OLD_HASHES=()
