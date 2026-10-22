@@ -218,27 +218,3 @@ jobs:
         gh release list --limit 50 | tail -n +$((KEEP_RELEASES + 1)) | awk '{print $1}' | xargs -I {} gh release delete {} -y --cleanup-tag || true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    # 📢 19. Telegram 通知
-    - name: Notify Telegram
-      if: success()
-      uses: actions/github-script@v9
-      with:
-        script: |
-          const token = process.env.TELEGRAM_BOT_TOKEN;
-          const chat = process.env.TELEGRAM_CHAT_ID;
-          const msg = `✅ OpenWrt Master x86 编译完成\n📦 Release: https://github.com/${context.repo.owner}/${context.repo.repo}/releases`;
-          await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chat, text: msg })
-          });
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-    # 📢 20. Bark 通知
-    - name: Bark Notify
-      if: success()
-      run: |
-        curl "https://api.day.app/${{ secrets.BARK_KEY }}/GitHub_Action/OpenWrt_Master_x86_已经编译完成✅"
