@@ -1,0 +1,216 @@
+name: Auto Update Check
+
+on:
+  # 允许手动检查
+  workflow_dispatch:
+
+  # 每天北京时间凌晨 5 点（UTC 前一天 21:00）
+  schedule:
+    - cron: '0 21 * * 5'
+
+permissions:
+  contents: write
+  actions: write
+
+# 防止多个检查任务同时修改状态文件
+concurrency:
+  group: auto-update-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ======================================================
+      # 1. 获取当前工作流仓库
+      # ======================================================
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # ======================================================
+      # 2. 检查全部第三方组件
+      # ======================================================
+
+      - name: Check third-party repositories
+        id: check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          STATE_FILE=".github/upstream-state/previous.txt"
+          TEMP_FILE="$(mktemp)"
+          trap 'rm -f "$TEMP_FILE"' EXIT
+
+          # ==================================================
+          # 第三方 Feed
+          # ==================================================
+          #
+          # DDNS-GO
+          # KixDNS
+          # Diskman
+          #
+          # ==================================================
+          # Git Clone 直接克隆
+          # ==================================================
+          #
+          # Honk
+          # DAE
+          # v2ray-geodata
+          #
+          # ==================================================
+
+          declare -A REPOS=(
+            ["ddnsgo"]="sirpdboy/luci-app-ddns-go"
+            ["kixdns"]="JohnsonRan/luci-app-kixdns"
+            ["diskman"]="sbwml/luci-app-diskman"
+            ["honk"]="QiuSimons/luci-app-honk"
+            ["dae"]="QiuSimons/luci-app-dae"
+            ["v2ray-geodata"]="lonelysoul/v2ray-geodata"
+          )
+
+          declare -A OLD_HASHES=()
+
+          BASELINE=false
+          UPDATED=false
+
+          echo "=================================================="
+          echo " 检查第三方组件上游更新"
+          echo "=================================================="
+
+          # 读取上次检查记录
+          if [ -f "$STATE_FILE" ]; then
+            while read -r name hash; do
+              [ -n "${name:-}" ] || continue
+              [ -n "${hash:-}" ] || continue
+
+              OLD_HASHES["$name"]="$hash"
+            done < "$STATE_FILE"
+          else
+            BASELINE=true
+            echo "首次运行，将建立上游提交基线。"
+          fi
+
+          # 检查每个仓库的默认分支 HEAD
+          for name in "${!REPOS[@]}"; do
+            repo="${REPOS[$name]}"
+
+            echo
+            echo "检查组件：$name"
+            echo "仓库地址：https://github.com/$repo"
+
+            hash="$(
+              git ls-remote \
+                "https://github.com/${repo}.git" \
+                HEAD |
+              awk 'NR == 1 { print $1 }'
+            )"
+
+            if [ -z "$hash" ]; then
+              echo "❌ 获取仓库提交失败：$repo"
+              exit 1
+            fi
+
+            printf '%s %s\n' "$name" "$hash" >> "$TEMP_FILE"
+
+            old_hash="${OLD_HASHES[$name]:-}"
+
+            if [ "$BASELINE" = "true" ]; then
+              echo "建立基线：$name $hash"
+
+            elif [ -z "$old_hash" ]; then
+              echo "⚠️ 新增监控组件：$name"
+              echo "   视为发生变化，需要触发编译。"
+
+              UPDATED=true
+
+            elif [ "$hash" != "$old_hash" ]; then
+              echo "✅ 检测到更新：$name"
+              echo "   旧提交：$old_hash"
+              echo "   新提交：$hash"
+
+              UPDATED=true
+
+            else
+              echo "无更新：$name"
+            fi
+          done
+
+          # 固定排序，避免状态文件顺序变化
+          mkdir -p "$(dirname "$STATE_FILE")"
+          sort -o "$TEMP_FILE" "$TEMP_FILE"
+
+          # 保存本次检查结果
+          cp "$TEMP_FILE" "$STATE_FILE"
+
+          echo
+          echo "=================================================="
+
+          if [ "$BASELINE" = "true" ]; then
+            echo "首次检查完成，已建立提交基线。"
+          elif [ "$UPDATED" = "true" ]; then
+            echo "检测到第三方组件更新，将触发编译。"
+          else
+            echo "所有第三方组件均无更新。"
+          fi
+
+          echo "=================================================="
+
+          echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
+          echo "updated=$UPDATED" >> "$GITHUB_OUTPUT"
+
+      # ======================================================
+      # 3. 保存上游提交状态
+      # ======================================================
+
+      - name: Save upstream state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/upstream-state/previous.txt
+
+          if git diff --cached --quiet; then
+            echo "上游状态文件没有变化，无需提交。"
+          else
+            git commit -m "chore: update third-party upstream state"
+            git push
+            echo "✅ 上游提交状态已保存。"
+          fi
+
+      # ======================================================
+      # 4. 检测到任意第三方组件更新后触发编译
+      # ======================================================
+
+      - name: Trigger OpenWrt build
+        if: |
+          steps.check.outputs.baseline == 'false' &&
+          steps.check.outputs.updated == 'true'
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.ACTIONS_TRIGGER_PAT }}
+          event-type: Upstream Triggered Build
+          client-payload: |
+            {
+              "reason": "third-party-updated",
+              "run_id": "${{ github.run_id }}"
+            }
+
+      # ======================================================
+      # 5. 清理旧工作流记录
+      # ======================================================
+
+      - name: Delete old workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 7
+          keep_minimum_runs: 5
