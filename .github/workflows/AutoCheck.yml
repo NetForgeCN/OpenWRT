@@ -202,15 +202,3 @@ jobs:
               "reason": "third-party-updated",
               "run_id": "${{ github.run_id }}"
             }
-
-      # ======================================================
-      # 5. 清理旧工作流记录
-      # ======================================================
-
-      - name: Delete old workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 7
-          keep_minimum_runs: 5
