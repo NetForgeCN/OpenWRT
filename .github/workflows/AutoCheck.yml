@@ -6,7 +6,7 @@ on:
 
   # 每天北京时间凌晨 5 点（UTC 前一天 21:00）
   schedule:
-    - cron: '0 21 * * 5'
+    - cron: '0 21 * * *'
 
 permissions:
   contents: write
