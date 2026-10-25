@@ -4,10 +4,10 @@
 # git clone https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon
 # git clone https://github.com/JohnsonRan/luci-app-kixdns.git package/kixdns
 rm -rf feeds/packages/net/v2ray-geodata
-git clone https://github.com/QiuSimons/luci-app-dae.git package/dae
+# git clone https://github.com/QiuSimons/luci-app-dae.git package/dae
 git clone https://github.com/NetForgeCN/Loyalsoldier.git package/v2ray-geodata
 git clone https://github.com/gSpotx2f/luci-app-temp-status.git     package/luci-app-temp-status
-git clone https://github.com/QiuSimons/luci-app-honk.git package/honk
+# git clone https://github.com/QiuSimons/luci-app-honk.git package/honk
 
 
 
