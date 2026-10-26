@@ -1,4 +1,4 @@
-name: Delete Old Actions, Releases and Tags
+name: Clean Releases and Tags
 
 
 on:
