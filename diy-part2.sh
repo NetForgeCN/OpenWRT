@@ -1,299 +1,181 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# ============================================================
+# DIY2：第三方软件包、Rust LLVM 与内核配置
+#
+# 由 GitHub Actions 工作流调用。
+#
+# 处理内容：
+# 1. 克隆非 feeds 管理的第三方软件包
+# 2. 修改 Rust LLVM 下载参数
+# 3. 替换官方 v2ray-geodata
+# 4. 修改 x86 Linux 6.18 内核配置
+#
+# GitHub Actions 每次均按首次构建处理。
+# 所有 git clone 均不使用浅克隆。
+# ============================================================
 
 set -e
 
-# ============================================================
-# 基础配置
-# ============================================================
+cd "$GITHUB_WORKSPACE"
 
-echo "============================================================"
-echo " OpenWrt DIY"
-echo "============================================================"
-
-# ------------------------------------------------------------
-# Git 仓库处理函数
-#
-# 第一次执行：
-#   目录不存在 -> clone
-#
-# 后续执行：
-#   目录存在且是 Git 仓库 -> 更新到远程默认分支
-# ------------------------------------------------------------
-
-clone_or_update() {
-    local REPO="$1"
-    local DIR="$2"
-
-    echo
-    echo "------------------------------------------------------------"
-    echo "处理：$DIR"
-    echo "仓库：$REPO"
-    echo "------------------------------------------------------------"
-
-    if [ -d "$DIR/.git" ]; then
-
-        echo "--> 已存在，更新仓库"
-
-        cd "$DIR"
-
-        git reset --hard HEAD
-        git clean -fd
-
-        git fetch --prune origin
-
-        DEFAULT_BRANCH=$(git remote show origin 2>/dev/null \
-            | sed -n '/HEAD branch/s/.*: //p')
-
-        if [ -z "$DEFAULT_BRANCH" ]; then
-            DEFAULT_BRANCH="master"
-        fi
-
-        echo "--> 远程默认分支：$DEFAULT_BRANCH"
-
-        git reset --hard "origin/$DEFAULT_BRANCH"
-
-        cd - >/dev/null
-
-    elif [ -e "$DIR" ]; then
-
-        echo "❌ $DIR 已存在，但不是 Git 仓库"
-        echo "请检查目录内容后再执行。"
-        exit 1
-
-    else
-
-        echo "--> 首次执行，正在 clone"
-
-        git clone --depth=1 "$REPO" "$DIR"
-    fi
-
-    echo "--> $DIR 处理完成"
-}
-
+echo "=========================================="
+echo "处理第三方软件包与编译配置"
+echo "=========================================="
 
 # ============================================================
-# Rust 编译配置
+# 1. 克隆其他第三方软件包
 # ============================================================
 
-echo
-echo "============================================================"
-echo " 设置 Rust 编译选项 (download-ci-llvm=true)"
-echo "============================================================"
+echo "开始克隆第三方软件包"
 
-if [ -f "feeds/packages/lang/rust/Makefile" ]; then
-    sed -i 's/--set=llvm\.download-ci-llvm=false/--set=llvm.download-ci-llvm=true/' feeds/packages/lang/rust/Makefile
-    echo "--> Rust Makefile 修改成功"
-else
-    echo "⚠️ 未找到 feeds/packages/lang/rust/Makefile，请确保已执行 feeds update"
+# v2ray-geodata 单独处理，放在后面。
+# 以下仓库均不属于 feeds 管理。
+
+git clone \
+    https://github.com/gSpotx2f/luci-app-temp-status.git \
+    package/luci-app-temp-status
+
+git clone \
+    https://github.com/jerrykuku/luci-theme-argon.git \
+    package/luci-theme-argon
+
+git clone \
+    https://github.com/w9315273/luci-app-pulse.git \
+    package/luci-app-pulse
+
+echo "普通第三方软件包克隆完成"
+
+# ============================================================
+# 2. 修改 Rust LLVM 下载参数
+# ============================================================
+
+echo "修改 Rust LLVM 下载参数"
+
+RUST_MAKEFILE="feeds/packages/lang/rust/Makefile"
+
+if [ ! -f "$RUST_MAKEFILE" ]; then
+    echo "错误：找不到 $RUST_MAKEFILE"
+    exit 1
 fi
 
+# 将 false 或误写的 falst 修改为 true。
+# 如果已经是 true，则不重复修改。
+if grep -qE -- '--set=llvm\.download-ci-llvm=(falst|false)' "$RUST_MAKEFILE"; then
+
+    sed -i -E \
+        's/--set=llvm\.download-ci-llvm=(falst|false)/--set=llvm.download-ci-llvm=true/g' \
+        "$RUST_MAKEFILE"
+
+    echo "Rust LLVM 下载参数已修改为 true"
+
+elif grep -qF -- '--set=llvm.download-ci-llvm=true' "$RUST_MAKEFILE"; then
+
+    echo "Rust LLVM 下载参数已经是 true"
+
+else
+
+    echo "错误：未找到预期的 Rust LLVM 下载参数"
+    echo "请检查 $RUST_MAKEFILE"
+    exit 1
+
+fi
 
 # ============================================================
-# 第三方组件
+# 3. 删除官方 v2ray-geodata，克隆第三方版本
 # ============================================================
 
-# ------------------------------------------------------------
-# v2ray-geodata
-# ------------------------------------------------------------
+echo "替换官方 v2ray-geodata"
 
-# 删除 OpenWrt packages feed 自带的旧版本
-rm -rf feeds/packages/net/v2ray-geodata
+OFFICIAL_V2RAY="feeds/packages/net/v2ray-geodata"
+THIRD_V2RAY="package/v2ray-geodata"
 
-clone_or_update \
-    "https://github.com/NetForgeCN/Loyalsoldier.git" \
-    "package/v2ray-geodata"
+# 删除官方软件包定义。
+# 这是明确要求的特殊处理，不适用于其他第三方软件包。
 
+if [ -e "$OFFICIAL_V2RAY" ]; then
+    rm -rf -- "$OFFICIAL_V2RAY"
+    echo "已删除官方 v2ray-geodata"
+else
+    echo "官方 v2ray-geodata 不存在，跳过删除"
+fi
 
-# ------------------------------------------------------------
-# luci-app-temp-status
-# ------------------------------------------------------------
+# 克隆第三方版本。
+# 不使用 --depth，获取完整 Git 历史。
 
-clone_or_update \
-    "https://github.com/gSpotx2f/luci-app-temp-status.git" \
-    "package/luci-app-temp-status"
+git clone \
+    https://github.com/NetForgeCN/Loyalsoldier.git \
+    "$THIRD_V2RAY"
 
-
-# ------------------------------------------------------------
-# luci-app-dae
-# ------------------------------------------------------------
-
-clone_or_update \
-    "https://github.com/QiuSimons/luci-app-dae.git" \
-    "package/dae"
-
-
-# ------------------------------------------------------------
-# luci-theme-argon
-# ------------------------------------------------------------
-
-clone_or_update \
-    "https://github.com/jerrykuku/luci-theme-argon.git" \
-    "package/luci-theme-argon"
-
-
-# ------------------------------------------------------------
-# luci-app-homeproxy
-# ------------------------------------------------------------
-
-clone_or_update \
-    "https://github.com/XiaoHaiSly/luci-app-homeproxy.git" \
-    "package/luci-app-homeproxy"
-
-
-# ------------------------------------------------------------
-# luci-app-pulse
-# ------------------------------------------------------------
-
-clone_or_update \
-    "https://github.com/w9315273/luci-app-pulse.git" \
-    "package/luci-app-pulse"
-
-
-# ------------------------------------------------------------
-# luci-app-open_nexttrace (open-nexttrace)
-# ------------------------------------------------------------
-
-clone_or_update \
-    "https://github.com/haohaoget/luci-app-open_nexttrace.git" \
-    "package/open-nexttrace"
-
-
-# ------------------------------------------------------------
-# 如果以后需要 Honk，可以直接取消注释
-# ------------------------------------------------------------
-
-# clone_or_update \
-#     "https://github.com/QiuSimons/luci-app-honk.git" \
-#     "package/honk"
-
+echo "第三方 v2ray-geodata 克隆完成"
 
 # ============================================================
-# OpenWrt x86 内核配置
+# 4. 修改 x86 Linux 6.18 内核配置
 # ============================================================
 
-echo
-echo "============================================================"
-echo " 设置 x86 Linux 6.18 内核配置"
-echo "============================================================"
+echo "修改 x86 Linux 6.18 内核配置"
 
 KERNEL_CONFIG="target/linux/x86/config-6.18"
 
 if [ ! -f "$KERNEL_CONFIG" ]; then
-    echo "❌ 找不到：$KERNEL_CONFIG"
+    echo "错误：找不到 $KERNEL_CONFIG"
     exit 1
 fi
 
-# ------------------------------------------------------------
-# 幂等添加内核配置
+# 设置单个内核配置项：
+# - 删除原有的所有同名定义
+# - 写入指定的新值
+# - 避免重复配置
 #
-# 不再使用 cat >>，避免 GitHub Actions 或重复执行时
-# 产生重复配置。
-# ------------------------------------------------------------
+# 参数：
+# $1：配置名称，不包含 CONFIG_ 前缀
+# $2：目标配置行
 
-add_kernel_config() {
+set_kernel_config() {
+    local key="$1"
+    local value="$2"
+    local file="$3"
+    local tmp
 
-    local CONFIG="$1"
+    tmp="$(mktemp "${file}.XXXXXX")"
 
-    if grep -qxF "$CONFIG" "$KERNEL_CONFIG"; then
-        echo "已存在：$CONFIG"
-    else
-        echo "$CONFIG" >> "$KERNEL_CONFIG"
-        echo "已添加：$CONFIG"
-    fi
+    awk -v key="$key" '
+        $0 ~ "^CONFIG_" key "=" { next }
+        $0 ~ "^# CONFIG_" key " is not set$" { next }
+        { print }
+    ' "$file" > "$tmp"
+
+    printf '%s\n' "$value" >> "$tmp"
+
+    chmod --reference="$file" "$tmp"
+    mv -- "$tmp" "$file"
 }
 
-add_kernel_config "CONFIG_NETKIT=y"
-add_kernel_config "# CONFIG_X86_NATIVE_CPU is not set"
-add_kernel_config "# CONFIG_X86_SGX is not set"
+# 启用 NETKIT
+set_kernel_config \
+    "NETKIT" \
+    "CONFIG_NETKIT=y" \
+    "$KERNEL_CONFIG"
 
+# 禁用 X86_NATIVE_CPU
+set_kernel_config \
+    "X86_NATIVE_CPU" \
+    "# CONFIG_X86_NATIVE_CPU is not set" \
+    "$KERNEL_CONFIG"
 
-# ============================================================
-# DAE AMD64 v3 / AVX2
-# ============================================================
+# 禁用 X86_SGX
+set_kernel_config \
+    "X86_SGX" \
+    "# CONFIG_X86_SGX is not set" \
+    "$KERNEL_CONFIG"
 
-echo
-echo "============================================================"
-echo " 设置 DAE 为 AMD64 v3 / AVX2 编译"
-echo "============================================================"
+echo "内核配置修改完成"
 
-DAE_DIR="package/dae"
-DAE_MAKEFILE="$DAE_DIR/dae/Makefile"
+# 显示最终配置，便于 Actions 日志检查。
+grep -nE \
+    '^(CONFIG_NETKIT=y|# CONFIG_X86_NATIVE_CPU is not set|# CONFIG_X86_SGX is not set)$' \
+    "$KERNEL_CONFIG"
 
-if [ ! -f "$DAE_MAKEFILE" ]; then
-    echo "❌ 未找到 DAE Makefile：$DAE_MAKEFILE"
-    exit 1
-fi
-
-echo "--> DAE Makefile：$DAE_MAKEFILE"
-
-
-# ------------------------------------------------------------
-# 删除旧的 GO_AMD64 定义
-# ------------------------------------------------------------
-
-sed -i '/^[[:space:]]*GO_AMD64[[:space:]]*:?=/d' "$DAE_MAKEFILE"
-
-
-# ------------------------------------------------------------
-# 在 GO_PKG_BUILD_VARS 前加入 GO_AMD64:=v3
-# ------------------------------------------------------------
-
-if grep -q '^GO_PKG_BUILD_VARS+=' "$DAE_MAKEFILE"; then
-
-    sed -i \
-        '/^GO_PKG_BUILD_VARS+=/i GO_AMD64:=v3' \
-        "$DAE_MAKEFILE"
-
-else
-
-    echo "❌ 未找到 GO_PKG_BUILD_VARS+="
-    echo "无法自动设置 GO_AMD64=v3"
-    exit 1
-
-fi
-
-
-# ============================================================
-# 最终检查
-# ============================================================
-
-echo
-echo "============================================================"
-echo " DIY 配置完成"
-echo "============================================================"
-
-echo
-echo "[内核配置]"
-grep -n -E \
-    'CONFIG_NETKIT|CONFIG_X86_NATIVE_CPU|CONFIG_X86_SGX' \
-    "$KERNEL_CONFIG" || true
-
-echo
-echo "[DAE AMD64]"
-grep -n -E \
-    '^GO_AMD64[[:space:]]*:?=' \
-    "$DAE_MAKEFILE" || true
-
-echo
-echo "[第三方组件]"
-
-for DIR in \
-    "package/v2ray-geodata" \
-    "package/luci-app-temp-status" \
-    "package/dae" \
-    "package/luci-theme-argon" \
-    "package/luci-app-homeproxy" \
-    "package/luci-app-pulse" \
-    "package/open-nexttrace"
-do
-    if [ -d "$DIR" ]; then
-        echo "✓ $DIR"
-    else
-        echo "❌ $DIR"
-    fi
-done
-
-echo
-echo "============================================================"
-echo " DIY 脚本执行完成"
-echo "============================================================"
+echo "=========================================="
+echo "DIY2 所有任务完成"
+echo "=========================================="
