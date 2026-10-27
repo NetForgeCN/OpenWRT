@@ -72,6 +72,23 @@ clone_or_update() {
 
 
 # ============================================================
+# Rust 编译配置
+# ============================================================
+
+echo
+echo "============================================================"
+echo " 设置 Rust 编译选项 (download-ci-llvm=true)"
+echo "============================================================"
+
+if [ -f "feeds/packages/lang/rust/Makefile" ]; then
+    sed -i 's/--set=llvm\.download-ci-llvm=false/--set=llvm.download-ci-llvm=true/' feeds/packages/lang/rust/Makefile
+    echo "--> Rust Makefile 修改成功"
+else
+    echo "⚠️ 未找到 feeds/packages/lang/rust/Makefile，请确保已执行 feeds update"
+fi
+
+
+# ============================================================
 # 第三方组件
 # ============================================================
 
@@ -103,6 +120,42 @@ clone_or_update \
 clone_or_update \
     "https://github.com/QiuSimons/luci-app-dae.git" \
     "package/dae"
+
+
+# ------------------------------------------------------------
+# luci-theme-argon
+# ------------------------------------------------------------
+
+clone_or_update \
+    "https://github.com/jerrykuku/luci-theme-argon.git" \
+    "package/luci-theme-argon"
+
+
+# ------------------------------------------------------------
+# luci-app-homeproxy
+# ------------------------------------------------------------
+
+clone_or_update \
+    "https://github.com/XiaoHaiSly/luci-app-homeproxy.git" \
+    "package/luci-app-homeproxy"
+
+
+# ------------------------------------------------------------
+# luci-app-pulse
+# ------------------------------------------------------------
+
+clone_or_update \
+    "https://github.com/w9315273/luci-app-pulse.git" \
+    "package/luci-app-pulse"
+
+
+# ------------------------------------------------------------
+# luci-app-open_nexttrace (open-nexttrace)
+# ------------------------------------------------------------
+
+clone_or_update \
+    "https://github.com/haohaoget/luci-app-open_nexttrace.git" \
+    "package/open-nexttrace"
 
 
 # ------------------------------------------------------------
@@ -227,7 +280,11 @@ echo "[第三方组件]"
 for DIR in \
     "package/v2ray-geodata" \
     "package/luci-app-temp-status" \
-    "package/dae"
+    "package/dae" \
+    "package/luci-theme-argon" \
+    "package/luci-app-homeproxy" \
+    "package/luci-app-pulse" \
+    "package/open-nexttrace"
 do
     if [ -d "$DIR" ]; then
         echo "✓ $DIR"
