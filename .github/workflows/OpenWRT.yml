@@ -17,6 +17,12 @@ env:
   FEEDS_CONF: feeds.conf.default
   TZ: Asia/Shanghai
   DEBIAN_FRONTEND: noninteractive
+  # ⚠️ 必须是 openwrt/.ccache，不是 ~/.ccache。
+  # OpenWrt 的 rules.mk 在 CONFIG_CCACHE=y 时执行
+  #   export CCACHE_DIR := $(if $(CONFIG_CCACHE_DIR),$(CONFIG_CCACHE_DIR),$(TOPDIR)/.ccache)
+  # TOPDIR 就是 openwrt/，所以构建实际读写的缓存目录在 openwrt/.ccache。
+  # 这里显式钉住同一个路径，保证下面的 ccache -M 和缓存步骤操作的是同一份数据。
+  CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
 
 jobs:
   # ============================================================
@@ -72,26 +78,47 @@ jobs:
         HASH=$(git log --pretty=tformat:%h -n1 -- tools toolchain)
         echo "hash=${HASH:-none}" >> "$GITHUB_OUTPUT"
 
-    # 💾 5. dl 缓存（源码包下载目录，命中后省 3 分钟）
+    # 💾 5. dl 缓存（源码包下载目录）
+    # key 从固定字符串改成绑定配置文件的哈希：
+    # 固定 key 的缓存一旦命中就永不刷新（actions/cache 只在 miss 时上传），
+    # 之后新增的源码包永远要重新下载，只能靠手改 -v1 才能更新。
+    # 现在 .config / diy-part*.sh 变了才换 key，其余时候仍然命中同一份快照。
     - name: Cache dl
       uses: actions/cache@v6
       with:
         path: openwrt/dl
-        key: dl-${{ runner.os }}-x86-v1
+        key: dl-${{ runner.os }}-x86-${{ hashFiles('.config', 'diy-part1.sh', 'diy-part2.sh') }}
         restore-keys: |
           dl-${{ runner.os }}-x86-
 
     # 💾 6. 工具链缓存（staging_dir，命中后省 1.5~2.5 小时）
-    # key 绑定 tools/toolchain 的最后提交，上游没动工具链就永远命中
-    - name: Cache toolchain
-      uses: actions/cache@v6
+    # 用 restore / save 拆分而不是 actions/cache：
+    # 保存步骤放到 job 末尾并加 if: always()，编译失败时也能把已经建好的
+    # staging_dir 存下来，下次不必从零重来。
+    - name: Restore toolchain cache
+      id: toolchain-restore
+      uses: actions/cache/restore@v6
       with:
         path: openwrt/staging_dir
         key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
         restore-keys: |
           toolchain-${{ runner.os }}-x86-
 
-    # 🔑 7. 加载自定义 feeds
+    # 💾 7. ccache 缓存
+    # key 里带 run_id：每次运行都写一份新的快照（ccache 内容每轮都在变，
+    # 固定 key 会导致它永远停留在第一次保存的状态），靠 restore-keys 前缀
+    # 命中上一轮，超出配额时由 GitHub 按 LRU 淘汰最老的几代。
+    - name: Restore ccache
+      id: ccache-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: openwrt/.ccache
+        key: ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-${{ github.run_id }}
+        restore-keys: |
+          ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-
+          ccache-${{ runner.os }}-x86-
+
+    # 🔑 8. 加载自定义 feeds
     - name: Load custom feeds
       run: |
         set -e
@@ -99,14 +126,14 @@ jobs:
         chmod +x "$DIY_P1_SH"
         ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P1_SH" )
 
-    # ⚙️ 8. 更新 & 安装 feeds
+    # ⚙️ 9. 更新 & 安装 feeds
     - name: Update feeds
       run: |
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 📝 9. 加载自定义配置 (.config & diy-part2.sh)
+    # 📝 10. 加载自定义配置 (.config & diy-part2.sh)
     - name: Load custom configuration
       run: |
         set -e
@@ -116,7 +143,7 @@ jobs:
         ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P2_SH" )
         ( cd openwrt && make defconfig )
 
-    # 📦 10. 下载依赖包（多线程 + 自动清除零字节损坏包）
+    # 📦 11. 下载依赖包（多线程 + 自动清除零字节损坏包）
     - name: Download packages
       run: |
         cd openwrt
@@ -125,22 +152,24 @@ jobs:
         make download -j"$(nproc)"
         find dl -size 0 -delete || true
 
-    # 🏗️ 11. 编译固件
+    # 🏗️ 12. 编译固件
     # 不再做 `make -j1 V=s` 兜底：冷编译都要 3 小时，单线程重编必然
     # 撞 360 分钟超时，而且会掩盖真正的错误。输出 tee 进 build.log。
+    # ccache 目录由 env.CCACHE_DIR 指定为 openwrt/.ccache，与 rules.mk 一致。
     - name: Compile firmware
       run: |
         cd openwrt
-        mkdir -p ~/.ccache
-        ccache -M 2G
+        mkdir -p "$CCACHE_DIR"
+        ccache -M 3G
         ccache -z
+        echo "ccache dir: $(ccache -k cache_dir 2>/dev/null || echo "$CCACHE_DIR")"
         export FORCE_UNSAFE_CONFIGURE=1
         set -o pipefail
         make -j"$(($(nproc)+1))" 2>&1 | tee build.log
         echo "===== ccache 编译统计 ====="
         ccache -s
 
-    # 📂 12. 检查固件输出 —— 断言主镜像存在且大于 5MB，
+    # 📂 13. 检查固件输出 —— 断言主镜像存在且大于 5MB，
     # 残缺固件在这里就失败，而不是发一个空 Release
     - name: Check firmware
       run: |
@@ -149,7 +178,7 @@ jobs:
         MAIN=$(find openwrt/bin/targets -type f -name "*squashfs-combined-efi.img.gz" -size +5M | head -n1)
         [ -n "$MAIN" ] || { echo "❌ 未生成有效的 squashfs-combined-efi 固件"; exit 1; }
 
-    # 📦 13. 收集发布资产 + 元信息（commit、缓存 key 都写进 release notes）
+    # 📦 14. 收集发布资产 + 元信息（commit、缓存 key 都写进 release notes）
     - name: Collect release assets
       run: |
         mkdir -p release-assets
@@ -167,15 +196,19 @@ jobs:
         } > release-assets/release-notes.txt
         ls -lh release-assets/
 
-    # 📤 14. 上传固件 artifact（供 release job 发布）
+    # 📤 15. 上传固件 artifact（供 release job 发布）
+    # 固件本身已经是 .img.gz，再压缩一遍纯属浪费几分钟，保留原始字节。
+    # retention-days：Release 建好后 artifact 就没用了，不必占用 90 天。
     - name: Upload firmware artifact
       uses: actions/upload-artifact@v7
       with:
         name: firmware-x86-64
         path: release-assets/
         if-no-files-found: error
+        retention-days: 3
+        compression-level: 0
 
-    # 🪵 15. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
+    # 🪵 16. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
     - name: Upload build logs on failure
       uses: actions/upload-artifact@v7
       if: failure()
@@ -186,6 +219,28 @@ jobs:
           openwrt/logs/
           openwrt/.config
         if-no-files-found: ignore
+        retention-days: 7
+
+    # 💾 17. 保存 ccache —— 每轮都存，下一轮靠 restore-keys 续上
+    # if: always() 让编译失败 / 中途出错时也能保住已经产出的对象文件；
+    # continue-on-error 保证缓存写失败（配额、网络）不会把成功的构建判红。
+    - name: Save ccache
+      if: always()
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: openwrt/.ccache
+        key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+    # 💾 18. 保存工具链缓存 —— 只在本次是 miss 时保存，命中就不重复上传
+    # （命中还上传会覆盖同名条目，且白白多花一两分钟）
+    - name: Save toolchain cache
+      if: always() && steps.toolchain-restore.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v6
+      with:
+        path: openwrt/staging_dir
+        key: ${{ steps.toolchain-restore.outputs.cache-primary-key }}
 
   # ============================================================
   # release：只有这个 job 拿到写权限。即使 build 阶段被投毒，
@@ -210,7 +265,7 @@ jobs:
         name: firmware-x86-64
         path: release-assets
 
-    # 🏷️ 16. 发布 Release
+    # 🏷️ 19. 发布 Release
     # tag 精度到分钟，追加 run_id 后 6 位避免同分钟构建撞 tag
     - name: Create release
       env:
@@ -251,7 +306,7 @@ jobs:
 
         echo "✅ Release 创建完成：https://github.com/$GH_REPO/releases/tag/$TAG"
 
-    # 🗑️ 17. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
+    # 🗑️ 20. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
     # 避免 Title 含空格时取错 tag）
     - name: Delete old releases
       env:
