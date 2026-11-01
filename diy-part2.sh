@@ -10,9 +10,12 @@
 #   1. 克隆非 feeds 管理的第三方软件包
 #   2. 修改 Rust LLVM 下载参数
 #   3. 替换官方 v2ray-geodata
-#   4. 修改 x86 Linux 6.18 内核配置
+#   4. 修改 x86 Linux 6.x 内核配置（自动适配内核版本）
 #
 # 所有 git clone 均使用完整克隆，不使用浅克隆。
+#
+# 注意：新增/删除 clone 仓库时，请同步更新
+#       .github/workflows/AutoCheck.yml 里的监控清单。
 # ============================================================
 
 set -e
@@ -112,18 +115,28 @@ echo "✅ 第三方 v2ray-geodata 克隆完成"
 
 
 # ============================================================
-# 4. 修改 x86 Linux 6.18 内核配置
+# 4. 修改 x86 内核配置
+#
+# 不再硬编码 config-6.18：上游升内核到 6.19 时旧写法会直接
+# 导致构建失败。这里自动发现所有 config-6.* 文件，逐个幂等
+# 修改 —— 对不适用的内核版本无害。
 # ============================================================
 
 echo
-echo ">>> 4. 修改 x86 Linux 6.18 内核配置"
+echo ">>> 4. 修改 x86 内核配置"
 
-KERNEL_CONFIG="target/linux/x86/config-6.18"
+shopt -s nullglob
+KERNEL_CONFIGS=(target/linux/x86/config-6.*)
+shopt -u nullglob
 
-if [ ! -f "$KERNEL_CONFIG" ]; then
-    echo "❌ 错误：找不到 $KERNEL_CONFIG"
+if [ ${#KERNEL_CONFIGS[@]} -eq 0 ]; then
+    echo "❌ 错误：target/linux/x86/ 下没有找到 config-6.* 文件"
+    echo "可能上游内核版本号发生变化，请人工检查 target/linux/x86/"
     exit 1
 fi
+
+echo "发现内核配置文件："
+printf '  - %s\n' "${KERNEL_CONFIGS[@]}"
 
 # ------------------------------------------------------------
 # 设置内核配置
@@ -142,20 +155,22 @@ fi
 set_kernel_config() {
     local key="$1"
     local value="$2"
-    local tmp
+    local cfg tmp
 
-    tmp="$(mktemp "${KERNEL_CONFIG}.XXXXXX")"
+    for cfg in "${KERNEL_CONFIGS[@]}"; do
+        tmp="$(mktemp "${cfg}.XXXXXX")"
 
-    awk -v key="$key" '
-        $0 ~ "^CONFIG_" key "=" { next }
-        $0 ~ "^# CONFIG_" key " is not set$" { next }
-        { print }
-    ' "$KERNEL_CONFIG" > "$tmp"
+        awk -v key="$key" '
+            $0 ~ "^CONFIG_" key "=" { next }
+            $0 ~ "^# CONFIG_" key " is not set$" { next }
+            { print }
+        ' "$cfg" > "$tmp"
 
-    printf '%s\n' "$value" >> "$tmp"
+        printf '%s\n' "$value" >> "$tmp"
 
-    chmod --reference="$KERNEL_CONFIG" "$tmp"
-    mv -- "$tmp" "$KERNEL_CONFIG"
+        chmod --reference="$cfg" "$tmp"
+        mv -- "$tmp" "$cfg"
+    done
 }
 
 # 启用 NETKIT
@@ -183,9 +198,11 @@ echo "✅ 内核配置修改完成"
 echo
 echo ">>> 最终内核配置："
 
-grep -nE \
-    '^(CONFIG_NETKIT=y|# CONFIG_X86_NATIVE_CPU is not set|# CONFIG_X86_SGX is not set)$' \
-    "$KERNEL_CONFIG"
+for cfg in "${KERNEL_CONFIGS[@]}"; do
+    grep -nE \
+        '^(CONFIG_NETKIT=y|# CONFIG_X86_NATIVE_CPU is not set|# CONFIG_X86_SGX is not set)$' \
+        "$cfg"
+done
 
 
 # ============================================================

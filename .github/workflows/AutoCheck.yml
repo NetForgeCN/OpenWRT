@@ -4,13 +4,12 @@ on:
   # 允许手动检查
   workflow_dispatch:
 
-  # 每天北京时间凌晨 5 点（UTC 前一天 21:00）
+  # 每天北京时间凌晨 5 点（UTC 21:17，避开整点调度高峰）
   schedule:
-    - cron: '0 21 * * *'
+    - cron: '17 21 * * *'
 
 permissions:
   contents: write
-  actions: write
 
 # 防止多个检查任务同时修改状态文件
 concurrency:
@@ -20,6 +19,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       # ======================================================
@@ -28,11 +28,11 @@ jobs:
 
       - name: Checkout workflow repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       # ======================================================
       # 2. 检查全部第三方组件
+      #    清单必须与 diy-part1.sh 的 feeds + diy-part2.sh 的
+      #    git clone 保持一致，新增依赖时两边同步改。
       # ======================================================
 
       - name: Check third-party repositories
@@ -46,20 +46,25 @@ jobs:
           trap 'rm -f "$TEMP_FILE"' EXIT
 
           # ==================================================
-          # 第三方 Feed
+          # feeds（diy-part1.sh）
           # ==================================================
           #
           # DDNS-GO
           # KixDNS
           # Diskman
-          #
-          # ==================================================
-          # Git Clone 直接克隆
-          # ==================================================
-          #
           # Honk
           # DAE
-          # v2ray-geodata
+          # HomeProxy
+          # OpenNextTrace
+          #
+          # ==================================================
+          # git clone 直接克隆（diy-part2.sh）
+          # ==================================================
+          #
+          # v2ray-geodata（替换官方包）
+          # Temp Status
+          # Argon 主题
+          # Pulse
           #
           # ==================================================
 
@@ -69,13 +74,19 @@ jobs:
             ["diskman"]="sbwml/luci-app-diskman"
             ["honk"]="QiuSimons/luci-app-honk"
             ["dae"]="QiuSimons/luci-app-dae"
+            ["homeproxy"]="XiaoHaiSly/luci-app-homeproxy"
+            ["opennexttrace"]="haohaoget/luci-app-open_nexttrace"
             ["v2ray-geodata"]="NetForgeCN/Loyalsoldier"
+            ["temp-status"]="gSpotx2f/luci-app-temp-status"
+            ["argon"]="jerrykuku/luci-theme-argon"
+            ["pulse"]="w9315273/luci-app-pulse"
           )
 
           declare -A OLD_HASHES=()
 
           BASELINE=false
           UPDATED=false
+          FAILED=""
 
           echo "=================================================="
           echo " 检查第三方组件上游更新"
@@ -109,9 +120,15 @@ jobs:
               awk 'NR == 1 { print $1 }'
             )"
 
+            # 单个仓库检查失败不再让整个监控挂掉：
+            # 保留旧 hash、继续检查其他组件，最后统一标记失败
             if [ -z "$hash" ]; then
-              echo "❌ 获取仓库提交失败：$repo"
-              exit 1
+              echo "❌ 获取仓库提交失败：$repo（保留旧状态）"
+              FAILED="$FAILED $name"
+
+              old_hash="${OLD_HASHES[$name]:-}"
+              [ -n "$old_hash" ] && printf '%s %s\n' "$name" "$old_hash" >> "$TEMP_FILE"
+              continue
             fi
 
             printf '%s %s\n' "$name" "$hash" >> "$TEMP_FILE"
@@ -157,10 +174,15 @@ jobs:
             echo "所有第三方组件均无更新。"
           fi
 
+          if [ -n "$FAILED" ]; then
+            echo "⚠️ 以下组件检查失败：$FAILED"
+          fi
+
           echo "=================================================="
 
           echo "baseline=$BASELINE" >> "$GITHUB_OUTPUT"
           echo "updated=$UPDATED" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
 
       # ======================================================
       # 3. 保存上游提交状态
@@ -181,6 +203,7 @@ jobs:
             echo "上游状态文件没有变化，无需提交。"
           else
             git commit -m "chore: update third-party upstream state"
+            git pull --rebase origin main || true
             git push
             echo "✅ 上游提交状态已保存。"
           fi

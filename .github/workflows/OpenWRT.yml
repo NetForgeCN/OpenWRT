@@ -4,35 +4,38 @@ on:
   workflow_dispatch:
   repository_dispatch:
 
-# 取消重复排队的旧任务，避免并发冲突
+# 构建一次 3 小时以上，宁可排队也不要取消在跑的构建
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: main
-  SSH_ENABLED: false
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  CONFIG_FILE: .config
   FEEDS_CONF: feeds.conf.default
   TZ: Asia/Shanghai
   DEBIAN_FRONTEND: noninteractive
-  UPLOAD_RELEASE: true
-  # 推荐的 OpenWRT 专用缓存地址（社区最新）
-  REF_REPO: https://github.com/openwrt/openwrt
 
 jobs:
+  # ============================================================
+  # build：只给读权限。这一步会执行大量第三方 feeds / 软件包的
+  # Makefile，万一上游被投毒，也不该拿到仓库写权限。
+  # ============================================================
   build:
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     permissions:
-      contents: write
+      contents: read
     steps:
-    # 🧾 1. 拉取仓库（含.config等DIY配置）
+    # 🧾 1. 拉取仓库（含 .config 等配置）
+    # persist-credentials: false —— 不把 token 留在 .git/config 里，
+    # 第三方 Makefile 即使恶意也无法读取凭据
     - name: Checkout repository
       uses: actions/checkout@v7
+      with:
+        persist-credentials: false
 
     # 🧰 2. 初始化环境
     - name: Init environment
@@ -44,177 +47,189 @@ jobs:
         df -hT
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install clang llvm lld unzip ccache \
-        bzip2 g++ gawk gcc git glibc-source libncurses-dev make 
+          bzip2 g++ gawk gcc git glibc-source libncurses-dev make \
+          python3 rsync file patch bison flex zlib1g-dev libssl-dev \
+          libelf-dev bc cpio gettext swig time
         sudo timedatectl set-timezone Asia/Shanghai
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
 
-    # 🔄 3. 拉取 OpenWRT 源码（建议参考仓库：https://github.com/openwrt/openwrt）
+    # 🔄 3. 拉取 OpenWrt 源码 —— 完整历史（不用浅克隆），
+    # 这样 `git log -- tools toolchain` 才能算出稳定的缓存 key
     - name: Clone source
-      id: clone-source
       run: |
-        mkdir -p compile
-        cd compile
-        git clone --depth=1 --filter=blob:none -b $REPO_BRANCH $REPO_URL openwrt
-        ln -sf $GITHUB_WORKSPACE/compile/openwrt $GITHUB_WORKSPACE/openwrt
-   
+        git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
         cd openwrt
         OPENWRT_COMMIT=$(git rev-parse HEAD)
         echo "OpenWrt commit: $OPENWRT_COMMIT"
-        echo "commit=$OPENWRT_COMMIT" >> "$GITHUB_OUTPUT"
+        echo "OPENWRT_COMMIT=$OPENWRT_COMMIT" >> "$GITHUB_ENV"
 
-    # 💾 4. 专用 OpenWRT 缓存（dl + ccache + toolchain）—— 社区最成熟方案
-    # 使用 klever1988/cachewrtbuild@main（已验证，命中率极高，自动处理 dl / ccache / staging_dir）
-    - name: Cache OpenWrt Build
-      uses: klever1988/cachewrtbuild@main
+    # 🔑 4. 计算工具链 hash，作为缓存 key 的一部分
+    - name: Compute toolchain hash
+      id: toolchain-hash
+      run: |
+        cd openwrt
+        HASH=$(git log --pretty=tformat:%h -n1 -- tools toolchain)
+        echo "hash=${HASH:-none}" >> "$GITHUB_OUTPUT"
+
+    # 💾 5. dl 缓存（源码包下载目录，命中后省 3 分钟）
+    - name: Cache dl
+      uses: actions/cache@v6
       with:
-        ccache: true
-        toolchain: true
-        skip: true  # 命中缓存时跳过工具链编译，大幅加速
-        prefix: openwrt
-        mixkey: openwrt-main-x86
-        # 下面是专用 action 自动生成的 key（你不需要手动改）
-        # extra_paths: |
-        #   openwrt/dl
-        #   ~/.ccache
+        path: openwrt/dl
+        key: dl-${{ runner.os }}-x86-v1
+        restore-keys: |
+          dl-${{ runner.os }}-x86-
 
-    # # 🔌 5. SSH 连接调试（已修复为官方推荐 action）
-    # - name: SSH连接到Actions
-    #   uses: github.com/marketplace/actions/ssh-to-github-actions@v1.0.0
-    #   if: env.SSH_ENABLED == 'true' || contains(github.event.action, 'ssh')
-    #   env:
-    #     TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-    #     TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-# 
-    # 🔑 6. 加载自定义 feeds
+    # 💾 6. 工具链缓存（staging_dir，命中后省 1.5~2.5 小时）
+    # key 绑定 tools/toolchain 的最后提交，上游没动工具链就永远命中
+    - name: Cache toolchain
+      uses: actions/cache@v6
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
+        restore-keys: |
+          toolchain-${{ runner.os }}-x86-
+
+    # 🔑 7. 加载自定义 feeds
     - name: Load custom feeds
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        set -e
+        [ -e "$FEEDS_CONF" ] && cp "$FEEDS_CONF" openwrt/feeds.conf.default
+        chmod +x "$DIY_P1_SH"
+        ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P1_SH" )
 
-    # ⚙️ 7. 更新 & 安装 feeds
+    # ⚙️ 8. 更新 & 安装 feeds
     - name: Update feeds
       run: |
-        [ -f "$FEEDS_CONF" ] && cp $FEEDS_CONF openwrt/feeds.conf.default
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    # 📝 8. 加载自定义配置 (.config & diy-part2.sh)
+    # 📝 9. 加载自定义配置 (.config & diy-part2.sh)
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-        make defconfig
+        set -e
+        [ -e files ] && cp -a files openwrt/files
+        [ -e .config ] && cp .config openwrt/.config
+        chmod +x "$DIY_P2_SH"
+        ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P2_SH" )
+        ( cd openwrt && make defconfig )
 
-    # 📦 9. 下载依赖包 (多线程 -j8 + 自动清除零字节损坏包)
+    # 📦 10. 下载依赖包（多线程 + 自动清除零字节损坏包）
     - name: Download packages
       run: |
         cd openwrt
         find dl -size 0 -delete || true
         find dl -name "*.tmp" -delete || true
-        make download -j8
+        make download -j"$(nproc)"
         find dl -size 0 -delete || true
 
-    # 🏗️ 10. 编译固件 (MAKEFLAGS + FORCE_UNSAFE_CONFIGURE + ccache 优化)
+    # 🏗️ 11. 编译固件
+    # 不再做 `make -j1 V=s` 兜底：冷编译都要 3 小时，单线程重编必然
+    # 撞 360 分钟超时，而且会掩盖真正的错误。输出 tee 进 build.log。
     - name: Compile firmware
-      id: compile
       run: |
         cd openwrt
-        echo "===== 配置 ccache ====="
         mkdir -p ~/.ccache
-        ccache -M 5G
+        ccache -M 2G
         ccache -z
-       
-        echo "===== 开始编译 ====="
         export FORCE_UNSAFE_CONFIGURE=1
-        export MAKEFLAGS="-j$(($(nproc)+1))"
-       
-        make -j$(($(nproc)+1)) || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
+        set -o pipefail
+        make -j"$(($(nproc)+1))" 2>&1 | tee build.log
         echo "===== ccache 编译统计 ====="
         ccache -s
 
-    # 💾 11. 保存缓存（已通过专用 action 自动处理，save 已触发）
-    # 如果需要手动额外保存 dl（可选），可保留以下两步：
-    # - name: Save OpenWrt dl cache
-    #   if: success()
-    #   uses: actions/cache/save@v6
-    #   with:
-    #     path: openwrt/dl
-    #     key: ${{ runner.os }}-${{ runner.arch }}-openwrt-dl-${{ github.ref_name }}-${{ github.run_id }}
-
-    # 💾 12. 保存 ccache
-    # - name: Save ccache
-    #   if: success()
-    #   uses: actions/cache/save@v6
-    #   with:
-    #     path: ~/.ccache
-    #     key: ${{ runner.os }}-${{ runner.arch }}-openwrt-ccache-${{ github.ref_name }}-${{ github.run_id }}
-
-    # 📂 13. 检查固件输出
+    # 📂 12. 检查固件输出 —— 断言主镜像存在且大于 5MB，
+    # 残缺固件在这里就失败，而不是发一个空 Release
     - name: Check firmware
       run: |
         echo "===== 固件输出 ====="
-        find openwrt/bin/targets -type f | grep -E "\.(img|img.gz|bin)$" || {
-          echo "❌ 未生成固件"
-          exit 1
-        }
+        find openwrt/bin/targets -type f \( -name "*.img.gz" -o -name "*.img" -o -name "*.bin" \) -size +5M -print
+        MAIN=$(find openwrt/bin/targets -type f -name "*squashfs-combined-efi.img.gz" -size +5M | head -n1)
+        [ -n "$MAIN" ] || { echo "❌ 未生成有效的 squashfs-combined-efi 固件"; exit 1; }
 
-    # 🪵 14. 编译失败时自动上传日志
-    - name: Upload compile logs on failure
+    # 📦 13. 收集发布资产 + 元信息（commit、缓存 key 都写进 release notes）
+    - name: Collect release assets
+      run: |
+        mkdir -p release-assets
+        shopt -s nullglob
+        cp -a openwrt/bin/targets/x86/64/*.img.gz \
+              openwrt/bin/targets/x86/64/*.img \
+              openwrt/bin/targets/x86/64/*.bin \
+              openwrt/bin/targets/x86/64/*.manifest \
+              openwrt/bin/targets/x86/64/*.buildinfo \
+              release-assets/
+        {
+          echo "Build Time: $(TZ=Asia/Shanghai date)"
+          echo "OpenWrt Commit: ${OPENWRT_COMMIT:-unknown}"
+          echo "Toolchain Key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}"
+        } > release-assets/release-notes.txt
+        ls -lh release-assets/
+
+    # 📤 14. 上传固件 artifact（供 release job 发布）
+    - name: Upload firmware artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: firmware-x86-64
+        path: release-assets/
+        if-no-files-found: error
+
+    # 🪵 15. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
+    - name: Upload build logs on failure
       uses: actions/upload-artifact@v7
       if: failure()
       with:
         name: openwrt-build-logs
         path: |
+          openwrt/build.log
           openwrt/logs/
           openwrt/.config
+        if-no-files-found: ignore
 
-    # 🏷️ 15. 生成 Tag
-    - name: Create tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true'
-      run: |
-        TAG="OpenWrt-$(date +"%Y%m%d-%H%M")"
-        echo "release_tag=$TAG" >> $GITHUB_OUTPUT
-        echo "Build Time: $(date)" > release.txt
-
-    # 🚀 16. 发布 Release
-    - name: Upload Release
-      uses: softprops/action-gh-release@v3
-      if: env.UPLOAD_RELEASE == 'true'
+  # ============================================================
+  # release：只有这个 job 拿到写权限。即使 build 阶段被投毒，
+  # 攻击者也接触不到 GITHUB_TOKEN。
+  # ============================================================
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+    - name: Download firmware artifact
+      uses: actions/download-artifact@v7
       with:
-        tag_name: ${{ steps.tag.outputs.release_tag }}
-        body_path: release.txt
-        overwrite_files: true
-        files: |
-          openwrt/bin/targets/x86/64/*.img.gz
-          openwrt/bin/targets/x86/64/*.img
-          openwrt/bin/targets/x86/64/*.bin
-          openwrt/bin/targets/x86/64/*.manifest
-          openwrt/bin/targets/x86/64/*.buildinfo
+        name: firmware-x86-64
+        path: release-assets
+
+    # 🏷️ 16. 发布 Release
+    # tag 精度到分钟，追加 run_id 后 6 位避免同分钟构建撞 tag
+    - name: Create release
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="OpenWrt-$(TZ=Asia/Shanghai date +"%Y%m%d-%H%M")-${GITHUB_RUN_ID: -6}"
+        shopt -s nullglob
+        files=(release-assets/*.img.gz release-assets/*.img release-assets/*.bin \
+               release-assets/*.manifest release-assets/*.buildinfo)
+        gh release create "$TAG" \
+          --title "$TAG" \
+          --notes-file release-assets/release-notes.txt \
+          "${files[@]}"
 
-    # 🧹 17. 清理旧 Workflow 运行记录
-    - name: Cleanup workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        token: ${{ github.token }}
-        repository: ${{ github.repository }}
-        retain_days: 5
-        keep_minimum_runs: 2
-
-    # 🗑️ 18. 删除旧 Release
+    # 🗑️ 17. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
+    # 避免 Title 含空格时取错 tag）
     - name: Delete old releases
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         KEEP_RELEASES=7
-        gh release list --limit 50 | tail -n +$((KEEP_RELEASES + 1)) | awk '{print $1}' | xargs -I {} gh release delete {} -y --cleanup-tag || true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        gh release list --limit 50 --json tagName --jq '.[].tagName' \
+          | tail -n +$((KEEP_RELEASES + 1)) \
+          | while read -r tag; do
+              [ -n "$tag" ] || continue
+              echo "删除旧 Release: $tag"
+              gh release delete "$tag" -y --cleanup-tag || true
+            done
