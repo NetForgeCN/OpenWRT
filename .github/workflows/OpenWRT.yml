@@ -197,6 +197,12 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    env:
+      # ❗关键：本 job 为了最小权限只下载 artifact，没有执行 checkout，
+      # 因此工作目录里没有 .git。gh 默认要靠 `git remote` 推断目标仓库，
+      # 会直接报 "failed to run git: fatal: not a git repository"。
+      # 必须显式给出目标仓库（GH_REPO 或 --repo），gh 才会走 API 而不再碰 git。
+      GH_REPO: ${{ github.repository }}
     steps:
     - name: Download firmware artifact
       uses: actions/download-artifact@v7
@@ -210,14 +216,40 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
+        set -euo pipefail
+
         TAG="OpenWrt-$(TZ=Asia/Shanghai date +"%Y%m%d-%H%M")-${GITHUB_RUN_ID: -6}"
+        echo "Release tag: $TAG"
+
+        # release-notes 由 build job 生成，缺失说明 artifact 内容不完整
+        if [ ! -f release-assets/release-notes.txt ]; then
+          echo "::error::缺少 release-assets/release-notes.txt"
+          ls -la release-assets/ || true
+          exit 1
+        fi
+
         shopt -s nullglob
         files=(release-assets/*.img.gz release-assets/*.img release-assets/*.bin \
                release-assets/*.manifest release-assets/*.buildinfo)
+        shopt -u nullglob
+
+        # nullglob 下无匹配会得到空数组，gh 会静默发一个没有资产的 Release，这里显式拦住
+        if [ "${#files[@]}" -eq 0 ]; then
+          echo "::error::release-assets/ 下没有找到任何固件文件"
+          ls -la release-assets/ || true
+          exit 1
+        fi
+
+        echo "待上传 ${#files[@]} 个文件："
+        printf '  %s\n' "${files[@]}"
+
         gh release create "$TAG" \
+          --repo "$GH_REPO" \
           --title "$TAG" \
           --notes-file release-assets/release-notes.txt \
           "${files[@]}"
+
+        echo "✅ Release 创建完成：https://github.com/$GH_REPO/releases/tag/$TAG"
 
     # 🗑️ 17. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
     # 避免 Title 含空格时取错 tag）
@@ -225,11 +257,31 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
+        set -euo pipefail
         KEEP_RELEASES=7
-        gh release list --limit 50 --json tagName --jq '.[].tagName' \
-          | tail -n +$((KEEP_RELEASES + 1)) \
-          | while read -r tag; do
-              [ -n "$tag" ] || continue
-              echo "删除旧 Release: $tag"
-              gh release delete "$tag" -y --cleanup-tag || true
-            done
+
+        # 1) 同样必须带 --repo：本 job 没有 git 仓库，否则和 create 一样报错
+        # 2) 用命令替换而不是管道：gh 失败会被 set -e 捕获，不会被管道吞掉
+        # 3) 按 createdAt 显式倒序，不依赖 API 的返回顺序
+        LIST="$(gh release list \
+          --repo "$GH_REPO" \
+          --limit 100 \
+          --json tagName,createdAt \
+          --jq 'sort_by(.createdAt) | reverse | .[].tagName')"
+
+        TAGS=()
+        while IFS= read -r line; do
+          [ -n "$line" ] && TAGS+=("$line")
+        done <<< "$LIST"
+
+        echo "当前 Release 数量：${#TAGS[@]}（保留最新 $KEEP_RELEASES 个）"
+        if [ "${#TAGS[@]}" -le "$KEEP_RELEASES" ]; then
+          echo "无需清理"
+          exit 0
+        fi
+
+        for tag in "${TAGS[@]:$KEEP_RELEASES}"; do
+          [ -n "$tag" ] || continue
+          echo "删除旧 Release: $tag"
+          gh release delete "$tag" --repo "$GH_REPO" -y --cleanup-tag || true
+        done
