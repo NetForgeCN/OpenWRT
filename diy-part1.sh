@@ -23,6 +23,7 @@ echo 'src-git dae https://github.com/QiuSimons/luci-app-dae.git' >>feeds.conf.de
 echo 'src-git honk https://github.com/QiuSimons/luci-app-honk.git' >>feeds.conf.default
 echo 'src-git homeproxy https://github.com/XiaoHaiSly/luci-app-homeproxy.git' >>feeds.conf.default
 echo 'src-git opennexttrace https://github.com/haohaoget/luci-app-open_nexttrace.git' >>feeds.conf.default
+echo 'src-git airplay2 https://github.com/NetForgeCN/luci-app-airplay2.git;main' >>feeds.conf.default
 
 echo "feeds 配置完成："
 cat feeds.conf.default
