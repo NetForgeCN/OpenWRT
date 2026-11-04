@@ -51,6 +51,10 @@ git clone \
     https://github.com/svenshi/luci-app-oxidns.git \
     package/luci-app-oxidns
 
+git clone  \
+    https://github.com/QiuSimons/luci-app-honk \
+    package/honk
+
 echo "第三方软件包克隆完成"
 
 
