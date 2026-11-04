@@ -47,6 +47,10 @@ git clone \
     https://github.com/w9315273/luci-app-pulse.git \
     package/luci-app-pulse
 
+git clone \
+    https://github.com/svenshi/luci-app-oxidns.git \
+    package/luci-app-oxidns
+
 echo "第三方软件包克隆完成"
 
 
