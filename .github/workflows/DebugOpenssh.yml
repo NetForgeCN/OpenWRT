@@ -37,15 +37,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: ccache-diy2
-            use_ccache: true
-            use_diy2: true
-          - name: ccache-only
-            use_ccache: true
-            use_diy2: false
-          - name: diy2-only
-            use_ccache: false
-            use_diy2: true
+          - name: world-target
+            build_target: true
+          - name: world-cleanup
+            build_target: false
     name: openssh-${{ matrix.name }}
     steps:
     - name: Checkout repository
@@ -90,8 +85,8 @@ jobs:
         restore-keys: |
           dl-${{ runner.os }}-x86-
 
-    - name: Restore ccache if enabled
-      if: matrix.use_ccache
+    - name: Restore ccache
+      id: ccache-restore
       uses: actions/cache/restore@v6
       with:
         path: openwrt/.ccache
@@ -118,8 +113,7 @@ jobs:
         cd openwrt
         cp "$GITHUB_WORKSPACE/.config" .config
 
-    - name: Run diy-part2 if enabled
-      if: matrix.use_diy2
+    - name: Run diy-part2
       run: |
         set -e
         chmod +x "$DIY_P2_SH"
@@ -130,6 +124,28 @@ jobs:
         cd openwrt
         make defconfig
         grep -E 'CONFIG_PACKAGE_openssh|CONFIG_CCACHE' .config || true
+
+    - name: Download packages
+      run: |
+        cd openwrt
+        find dl -size 0 -delete || true
+        make download -j"$(nproc)" || true
+
+    - name: Package cleanup (world prerequisite)
+      run: |
+        cd openwrt
+        make package/cleanup
+
+    - name: Compile kernel if requested
+      if: matrix.build_target
+      run: |
+        cd openwrt
+        export FORCE_UNSAFE_CONFIGURE=1
+        make target/linux/compile -j"$(($(nproc)+1))" 2>&1 | tail -20
+
+    - name: Resource snapshot
+      run: |
+        df -h / ; free -h || true
 
     - name: Compile openssh with V=s
       run: |
