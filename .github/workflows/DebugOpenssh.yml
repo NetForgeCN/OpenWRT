@@ -1,13 +1,18 @@
 name: Debug Openssh Build
 
-# 调试工作流（矩阵版）：定位 "openssh failed to build (build variant: without-pam)"。
+# 调试工作流（第三轮）：定位 "openssh failed to build (build variant: without-pam)"。
 #
-# 背景：干净环境（工具链缓存命中、无 ccache、不跑 diy-part2）下 openssh 10.6p2
-# 能正常编译（基线已通过）。本矩阵验证剩余两个变量：
-#   - 是否恢复 ccache 缓存（主构建会恢复约 1GB ccache）
-#   - 是否执行 diy-part2.sh（Rust/Golang/geodata/内核配置等改动）
+# 前两轮已排除（均通过）：
+#   - 上游 openssh 10.6p2 本身（官方 buildbot 也构建成功）
+#   - 工具链缓存、dl 缓存、ccache 缓存
+#   - diy-part1 / diy-part2 的全部改动（Rust/Golang/geodata/内核配置/额外包）
+#   - make download、make package/cleanup、target/linux 内核编译
 #
-# 组合：ccache+diy2 / ccache 单独 / diy2 单独（无 cache 无 diy2 的基线已验证通过）
+# 剩余唯一变量：完整 package/compile 全量并发构建。本工作流：
+#   1. 真实跑 `make package/compile -jN -k`（不中断，收集所有失败包）
+#   2. 检查 OOM 记录
+#   3. 随后在同一环境单独重编 openssh（-j1 V=s）抓取真实报错
+#
 # 排查完成后可直接删除本文件。
 
 on:
@@ -30,18 +35,9 @@ env:
 jobs:
   debug:
     runs-on: ubuntu-26.04
-    timeout-minutes: 150
+    timeout-minutes: 300
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: world-target
-            build_target: true
-          - name: world-cleanup
-            build_target: false
-    name: openssh-${{ matrix.name }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
@@ -136,34 +132,54 @@ jobs:
         cd openwrt
         make package/cleanup
 
-    - name: Compile kernel if requested
-      if: matrix.build_target
-      run: |
-        cd openwrt
-        export FORCE_UNSAFE_CONFIGURE=1
-        make target/linux/compile -j"$(($(nproc)+1))" 2>&1 | tail -20
-
     - name: Resource snapshot
       run: |
-        df -h / ; free -h || true
+        nproc; df -h / ; free -h || true
 
-    - name: Compile openssh with V=s
+    - name: Compile ALL packages (keep going, no abort)
       run: |
         cd openwrt
         export FORCE_UNSAFE_CONFIGURE=1
         mkdir -p "$CCACHE_DIR"
         ccache -z || true
         set -o pipefail
-        make package/feeds/packages/openssh/compile -j"$(($(nproc)+1))" V=s 2>&1 | tee openssh-debug.log
-        ccache -s || true
+        make package/compile -j"$(($(nproc)+1))" -k 2>&1 | tee pkg-compile.log || true
+        echo "===== 失败包清单 ====="
+        grep 'failed to build' pkg-compile.log | sort -u | head -30 || true
+        echo "===== openssh 相关行 ====="
+        grep -n 'openssh' pkg-compile.log | tail -20 || true
+
+    - name: OOM check
+      if: always()
+      run: |
+        sudo dmesg -T 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -10 || echo "无 OOM 记录"
+
+    - name: Retry openssh alone with V=s
+      if: always()
+      run: |
+        cd openwrt
+        export FORCE_UNSAFE_CONFIGURE=1
+        set -o pipefail
+        make package/feeds/packages/openssh/clean || true
+        make package/feeds/packages/openssh/compile -j1 V=s 2>&1 | tee openssh-retry.log || true
+        echo "===== 重试结果 =====";
+        grep -E 'failed to build|Error [0-9]|error:' openssh-retry.log | tail -30 || true
+
+    - name: Trim package log
+      if: always()
+      run: |
+        cd openwrt
+        tail -400 pkg-compile.log > pkg-compile-tail.log 2>/dev/null || true
+        ls -la *.log || true
 
     - name: Upload debug log
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: openssh-debug-${{ matrix.name }}
+        name: openssh-world-debug
         path: |
-          openwrt/openssh-debug.log
+          openwrt/openssh-retry.log
+          openwrt/pkg-compile-tail.log
           openwrt/logs/
           openwrt/.config
         if-no-files-found: ignore
