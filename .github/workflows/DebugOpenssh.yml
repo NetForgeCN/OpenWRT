@@ -1,0 +1,115 @@
+name: Debug Openssh Build
+
+# 一次性调试工作流：仅编译 openssh（without-pam 变体）并输出 V=s 详细日志，
+# 用于定位 "openssh failed to build (build variant: without-pam)" 的真实报错。
+# 与主构建的差异：不跑 diy-part2、不恢复 ccache、失败/成功都上传完整日志。
+# 排查完成后可直接删除本文件。
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: debug-openssh
+  cancel-in-progress: false
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: main
+  DIY_P1_SH: diy-part1.sh
+  FEEDS_CONF: feeds.conf.default
+  TZ: Asia/Shanghai
+  DEBIAN_FRONTEND: noninteractive
+  CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
+
+jobs:
+  debug:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+
+    - name: Init environment
+      run: |
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y \
+          clang llvm lld unzip ccache \
+          bzip2 g++ gawk gcc git glibc-source libncurses-dev make \
+          python3 rsync file patch bison flex zlib1g-dev libssl-dev \
+          libelf-dev bc cpio gettext swig time
+
+    - name: Clone source
+      run: |
+        git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
+        cd openwrt
+        echo "OpenWrt commit: $(git rev-parse HEAD)"
+        echo "feeds 里将使用的 openssh 版本："
+        git ls-remote https://github.com/openwrt/packages.git HEAD
+
+    - name: Compute toolchain hash
+      id: toolchain-hash
+      run: |
+        cd openwrt
+        HASH=$(git log --pretty=tformat:%h -n1 -- tools toolchain)
+        echo "hash=${HASH:-none}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore toolchain cache
+      id: toolchain-restore
+      uses: actions/cache/restore@v6
+      with:
+        path: openwrt/staging_dir
+        key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
+        restore-keys: |
+          toolchain-${{ runner.os }}-x86-
+
+    - name: Restore dl cache
+      uses: actions/cache/restore@v6
+      with:
+        path: openwrt/dl
+        key: dl-${{ runner.os }}-x86-debug
+        restore-keys: |
+          dl-${{ runner.os }}-x86-
+
+    - name: Load custom feeds
+      run: |
+        set -e
+        [ -e "$FEEDS_CONF" ] && cp "$FEEDS_CONF" openwrt/feeds.conf.default
+        chmod +x "$DIY_P1_SH"
+        ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P1_SH" )
+
+    - name: Update feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+    - name: Load config
+      run: |
+        cd openwrt
+        cp "$GITHUB_WORKSPACE/.config" .config
+        make defconfig
+        grep -E 'CONFIG_PACKAGE_openssh|CONFIG_CCACHE' .config || true
+
+    - name: Compile openssh with V=s
+      run: |
+        cd openwrt
+        export FORCE_UNSAFE_CONFIGURE=1
+        mkdir -p "$CCACHE_DIR"
+        set -o pipefail
+        make package/feeds/packages/openssh/compile -j1 V=s 2>&1 | tee openssh-debug.log
+
+    - name: Upload debug log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: openssh-debug-log
+        path: |
+          openwrt/openssh-debug.log
+          openwrt/logs/
+          openwrt/.config
+        if-no-files-found: ignore
+        retention-days: 7
