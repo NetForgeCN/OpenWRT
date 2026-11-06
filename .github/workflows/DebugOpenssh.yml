@@ -1,8 +1,13 @@
 name: Debug Openssh Build
 
-# 一次性调试工作流：仅编译 openssh（without-pam 变体）并输出 V=s 详细日志，
-# 用于定位 "openssh failed to build (build variant: without-pam)" 的真实报错。
-# 与主构建的差异：不跑 diy-part2、不恢复 ccache、失败/成功都上传完整日志。
+# 调试工作流（矩阵版）：定位 "openssh failed to build (build variant: without-pam)"。
+#
+# 背景：干净环境（工具链缓存命中、无 ccache、不跑 diy-part2）下 openssh 10.6p2
+# 能正常编译（基线已通过）。本矩阵验证剩余两个变量：
+#   - 是否恢复 ccache 缓存（主构建会恢复约 1GB ccache）
+#   - 是否执行 diy-part2.sh（Rust/Golang/geodata/内核配置等改动）
+#
+# 组合：ccache+diy2 / ccache 单独 / diy2 单独（无 cache 无 diy2 的基线已验证通过）
 # 排查完成后可直接删除本文件。
 
 on:
@@ -16,6 +21,7 @@ env:
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: main
   DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
   FEEDS_CONF: feeds.conf.default
   TZ: Asia/Shanghai
   DEBIAN_FRONTEND: noninteractive
@@ -24,9 +30,23 @@ env:
 jobs:
   debug:
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ccache-diy2
+            use_ccache: true
+            use_diy2: true
+          - name: ccache-only
+            use_ccache: true
+            use_diy2: false
+          - name: diy2-only
+            use_ccache: false
+            use_diy2: true
+    name: openssh-${{ matrix.name }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@v7
@@ -45,10 +65,6 @@ jobs:
     - name: Clone source
       run: |
         git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
-        cd openwrt
-        echo "OpenWrt commit: $(git rev-parse HEAD)"
-        echo "feeds 里将使用的 openssh 版本："
-        git ls-remote https://github.com/openwrt/packages.git HEAD
 
     - name: Compute toolchain hash
       id: toolchain-hash
@@ -70,9 +86,19 @@ jobs:
       uses: actions/cache/restore@v6
       with:
         path: openwrt/dl
-        key: dl-${{ runner.os }}-x86-debug
+        key: dl-${{ runner.os }}-x86-debug-${{ matrix.name }}
         restore-keys: |
           dl-${{ runner.os }}-x86-
+
+    - name: Restore ccache (matrix: use_ccache)
+      if: matrix.use_ccache
+      uses: actions/cache/restore@v6
+      with:
+        path: openwrt/.ccache
+        key: ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-matrix-${{ matrix.name }}
+        restore-keys: |
+          ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-
+          ccache-${{ runner.os }}-x86-
 
     - name: Load custom feeds
       run: |
@@ -91,6 +117,17 @@ jobs:
       run: |
         cd openwrt
         cp "$GITHUB_WORKSPACE/.config" .config
+
+    - name: Run diy-part2 (matrix: use_diy2)
+      if: matrix.use_diy2
+      run: |
+        set -e
+        chmod +x "$DIY_P2_SH"
+        ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P2_SH" )
+
+    - name: Make defconfig
+      run: |
+        cd openwrt
         make defconfig
         grep -E 'CONFIG_PACKAGE_openssh|CONFIG_CCACHE' .config || true
 
@@ -99,14 +136,16 @@ jobs:
         cd openwrt
         export FORCE_UNSAFE_CONFIGURE=1
         mkdir -p "$CCACHE_DIR"
+        ccache -z || true
         set -o pipefail
-        make package/feeds/packages/openssh/compile -j1 V=s 2>&1 | tee openssh-debug.log
+        make package/feeds/packages/openssh/compile -j"$(($(nproc)+1))" V=s 2>&1 | tee openssh-debug.log
+        ccache -s || true
 
     - name: Upload debug log
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: openssh-debug-log
+        name: openssh-debug-${{ matrix.name }}
         path: |
           openwrt/openssh-debug.log
           openwrt/logs/
