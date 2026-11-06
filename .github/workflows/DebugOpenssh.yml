@@ -90,7 +90,7 @@ jobs:
         restore-keys: |
           dl-${{ runner.os }}-x86-
 
-    - name: Restore ccache (matrix: use_ccache)
+    - name: Restore ccache if enabled
       if: matrix.use_ccache
       uses: actions/cache/restore@v6
       with:
@@ -118,7 +118,7 @@ jobs:
         cd openwrt
         cp "$GITHUB_WORKSPACE/.config" .config
 
-    - name: Run diy-part2 (matrix: use_diy2)
+    - name: Run diy-part2 if enabled
       if: matrix.use_diy2
       run: |
         set -e
