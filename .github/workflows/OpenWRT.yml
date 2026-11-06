@@ -51,14 +51,17 @@ jobs:
         lsb_release -a || true
         free -h
         df -hT
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install clang llvm lld unzip ccache \
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y \
+          clang llvm lld unzip ccache \
           bzip2 g++ gawk gcc git glibc-source libncurses-dev make \
           python3 rsync file patch bison flex zlib1g-dev libssl-dev \
-          libelf-dev bc cpio gettext swig time 
+          libelf-dev bc cpio gettext swig time
+        
         sudo timedatectl set-timezone Asia/Shanghai
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
+        
+        sudo apt-get -qq autoremove --purge -y
+        sudo apt-get -qq clean
 
     # 🔄 3. 拉取 OpenWrt 源码 —— 完整历史（不用浅克隆），
     # 这样 `git log -- tools toolchain` 才能算出稳定的缓存 key
