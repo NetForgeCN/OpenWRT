@@ -52,10 +52,9 @@ jobs:
           # DDNS-GO
           # KixDNS
           # Diskman
-          # Honk
           # DAE
-          # HomeProxy
           # OpenNextTrace
+          # Airplay2
           #
           # ==================================================
           # git clone 直接克隆（diy-part2.sh）
@@ -65,6 +64,7 @@ jobs:
           # Temp Status
           # Argon 主题
           # Pulse
+          # Oxidns
           #
           # ==================================================
 
@@ -72,14 +72,14 @@ jobs:
             ["ddnsgo"]="sirpdboy/luci-app-ddns-go"
             ["kixdns"]="JohnsonRan/luci-app-kixdns"
             ["diskman"]="sbwml/luci-app-diskman"
-            ["honk"]="QiuSimons/luci-app-honk"
             ["dae"]="QiuSimons/luci-app-dae"
-            ["homeproxy"]="XiaoHaiSly/luci-app-homeproxy"
             ["opennexttrace"]="haohaoget/luci-app-open_nexttrace"
+            ["airplay2"]="NetForgeCN/luci-app-airplay2"
             ["v2ray-geodata"]="NetForgeCN/Loyalsoldier"
             ["temp-status"]="gSpotx2f/luci-app-temp-status"
             ["argon"]="jerrykuku/luci-theme-argon"
             ["pulse"]="w9315273/luci-app-pulse"
+            ["oxidns"]="svenshi/luci-app-oxidns"
           )
 
           declare -A OLD_HASHES=()
