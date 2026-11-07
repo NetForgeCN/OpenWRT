@@ -69,6 +69,19 @@ log "配置第三方 feeds"
 
 [[ -f "$FEEDS_CONF" ]] || die "找不到 ${FEEDS_CONF}（当前目录：$(pwd)）"
 
+# ---------------------------------------------------------------------------
+# 官方 feed 源：git.openwrt.org -> GitHub 镜像
+#
+# 原因：git.openwrt.org 会对 GitHub Actions runner 的出口 IP 限流，且历史上
+# 多次被爬虫打爆过载；此时 ./scripts/feeds update -a 拉 packages/luci 等
+# 大仓库会长时间无输出挂起，表现为工作流「卡在 Update feeds」直到 6h 超时。
+# packages/luci/routing/telephony 在 github.com/openwrt/* 均有实时镜像
+# （HEAD 与上游一致），2025-07 OpenWrt 官方 buildbot 遇到同一问题时也是
+# 直接把 feeds.conf.default 的源 sed 成 github.com。
+# ---------------------------------------------------------------------------
+log "官方 feeds 源切换到 GitHub 镜像（规避 git.openwrt.org 限流）"
+sed_inplace 's;git\.openwrt\.org/(feed|project);github.com/openwrt;' "$FEEDS_CONF" || true
+
 # 删除旧的同类配置，保证重复运行不会产生重复条目
 for item in "${FEEDS[@]}"; do
     name="${item%%|*}"
