@@ -168,7 +168,42 @@ jobs:
         echo "ccache dir: $(ccache -k cache_dir 2>/dev/null || echo "$CCACHE_DIR")"
         export FORCE_UNSAFE_CONFIGURE=1
         set -o pipefail
-        make -j"$(($(nproc)+1))" 2>&1 | tee build.log
+
+        # 自愈说明：并行全量构建下，个别包（实测为 openssh without-pam）会报
+        #   ERROR: package/xxx failed to build
+        # 而该包在并发结束后单独 clean + 重建可以通过（已在同一环境实测）。
+        # 这里做有限轮自愈：并行编译 → 识别失败包 → 单包 V=s 重建 → 再并行编译。
+        MAX_ATTEMPTS=3
+        for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+          echo "===== 第 ${attempt}/${MAX_ATTEMPTS} 轮并行编译 ====="
+          if make -j"$(($(nproc)+1))" 2>&1 | tee build.log; then
+            echo "✅ 编译成功（第 ${attempt} 轮）"
+            break
+          fi
+
+          FAILED_PKGS="$(grep -oE 'ERROR: [^ ]+ failed to build' build.log \
+            | sed -E 's/^ERROR: //; s/ failed to build$//' | sort -u | tr '\n' ' ')"
+
+          if [ -z "${FAILED_PKGS// /}" ]; then
+            echo "::error::并行编译失败，但未能从日志中识别出失败包"
+            exit 1
+          fi
+
+          echo "⚠️ 失败包：${FAILED_PKGS}"
+          for pkg in $FAILED_PKGS; do
+            log="retry-$(printf '%s' "$pkg" | tr '/' '_').log"
+            echo ">>> 单包重建：$pkg"
+            make "${pkg}/clean" || true
+            make "${pkg}/compile" -j1 V=s 2>&1 | tee "$log" || \
+              echo "::warning::单包重建失败：${pkg}（日志：${log}）"
+          done
+
+          if [ "$attempt" = "$MAX_ATTEMPTS" ]; then
+            echo "::error::已重试 ${MAX_ATTEMPTS} 轮仍未通过，请查看 build.log"
+            exit 1
+          fi
+        done
+
         echo "===== ccache 编译统计 ====="
         ccache -s
 
@@ -219,6 +254,7 @@ jobs:
         name: openwrt-build-logs
         path: |
           openwrt/build.log
+          openwrt/retry-*.log
           openwrt/logs/
           openwrt/.config
         if-no-files-found: ignore
