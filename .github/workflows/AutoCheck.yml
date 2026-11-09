@@ -55,6 +55,7 @@ jobs:
           # DAE
           # OpenNextTrace
           # Airplay2
+          # Honk
           #
           # ==================================================
           # git clone 直接克隆（diy-part2.sh）
@@ -75,11 +76,12 @@ jobs:
             ["dae"]="QiuSimons/luci-app-dae"
             ["opennexttrace"]="haohaoget/luci-app-open_nexttrace"
             ["airplay2"]="NetForgeCN/luci-app-airplay2"
+            ["honk"]="QiuSimons/luci-app-honk"
             ["v2ray-geodata"]="NetForgeCN/Loyalsoldier"
             ["temp-status"]="gSpotx2f/luci-app-temp-status"
             ["argon"]="jerrykuku/luci-theme-argon"
             ["pulse"]="w9315273/luci-app-pulse"
-            ["oxidns"]="svenshi/luci-app-oxidns"
+            ["oxidns"]="NetForgeCN/luci-app-oxidns"
           )
 
           declare -A OLD_HASHES=()

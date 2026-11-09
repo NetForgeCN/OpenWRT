@@ -146,7 +146,55 @@ jobs:
         ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P2_SH" )
         ( cd openwrt && make defconfig )
 
-    # 📦 11. 下载依赖包（多线程 + 自动清除零字节损坏包）
+    # 🛠️ 11. 安装 honk 宿主机工具链（仅当 .config 选中 honk 时执行）
+    # honk 的核心不在 OpenWrt 构建树里交叉编译：honk/build_honk_core.sh 调用
+    # 宿主机的 Rust/cargo + Zig + bpf-linker 现场编 honk-core，版本由上游钉死
+    # （Zig 用 `zig version` 严格比对，不等就退出）。缺了会在 honk 包编译阶段
+    # 直接失败，所以在 .config 定稿之后、make download 之前装好。
+    # 下面三个版本号必须与 openwrt-suite README「宿主机依赖（honk 核心专用）」
+    # 以及 OpenWrt-ScriptBuild/compile.sh 的 HONK_* 常量保持一致。
+    - name: Install honk toolchain
+      run: |
+        set -euo pipefail
+        ZIG_VERSION=0.14.1
+        BPF_LINKER_VERSION=0.11.0
+        BPF_LINKER_SHA256=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+
+        if ! grep -qE '^CONFIG_PACKAGE_honk=[ym]' openwrt/.config; then
+          echo "未选中 honk（.config 无 CONFIG_PACKAGE_honk=y），跳过 honk 工具链安装"
+          exit 0
+        fi
+
+        echo "===== 安装 honk 构建依赖 ====="
+        sudo apt-get -qq update
+        sudo apt-get -qq install -y libbpf-dev cmake libclang-dev zstd xz-utils pkg-config
+
+        if ! command -v cargo >/dev/null 2>&1; then
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+        fi
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+
+        if ! command -v bpf-linker >/dev/null 2>&1; then
+          curl -fsSL --retry 3 -o /tmp/bpf-linker.tar.zst \
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "${BPF_LINKER_SHA256}  /tmp/bpf-linker.tar.zst" | sha256sum -c -
+          sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
+        fi
+
+        if ! command -v zig >/dev/null 2>&1 || [ "$(zig version)" != "$ZIG_VERSION" ]; then
+          curl -fsSL --retry 3 -o /tmp/zig.tar.xz \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
+          sudo ln -sf "/usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+        fi
+
+        zig version
+        bpf-linker --version || true
+        cargo --version
+
+    # 📦 12. 下载依赖包（多线程 + 自动清除零字节损坏包）
     - name: Download packages
       run: |
         cd openwrt
@@ -155,7 +203,7 @@ jobs:
         make download -j"$(nproc)"
         find dl -size 0 -delete || true
 
-    # 🏗️ 12. 编译固件
+    # 🏗️ 13. 编译固件
     # 不再做 `make -j1 V=s` 兜底：冷编译都要 3 小时，单线程重编必然
     # 撞 360 分钟超时，而且会掩盖真正的错误。输出 tee 进 build.log。
     # ccache 目录由 env.CCACHE_DIR 指定为 openwrt/.ccache，与 rules.mk 一致。
@@ -207,7 +255,7 @@ jobs:
         echo "===== ccache 编译统计 ====="
         ccache -s
 
-    # 📂 13. 检查固件输出 —— 断言主镜像存在且大于 5MB，
+    # 📂 14. 检查固件输出 —— 断言主镜像存在且大于 5MB，
     # 残缺固件在这里就失败，而不是发一个空 Release
     - name: Check firmware
       run: |
@@ -216,7 +264,7 @@ jobs:
         MAIN=$(find openwrt/bin/targets -type f -name "*squashfs-combined-efi.img.gz" -size +5M | head -n1)
         [ -n "$MAIN" ] || { echo "❌ 未生成有效的 squashfs-combined-efi 固件"; exit 1; }
 
-    # 📦 14. 收集发布资产 + 元信息（commit、缓存 key 都写进 release notes）
+    # 📦 15. 收集发布资产 + 元信息（commit、缓存 key 都写进 release notes）
     - name: Collect release assets
       run: |
         mkdir -p release-assets
@@ -234,7 +282,7 @@ jobs:
         } > release-assets/release-notes.txt
         ls -lh release-assets/
 
-    # 📤 15. 上传固件 artifact（供 release job 发布）
+    # 📤 16. 上传固件 artifact（供 release job 发布）
     # 固件本身已经是 .img.gz，再压缩一遍纯属浪费几分钟，保留原始字节。
     # retention-days：Release 建好后 artifact 就没用了，不必占用 90 天。
     - name: Upload firmware artifact
@@ -246,7 +294,7 @@ jobs:
         retention-days: 3
         compression-level: 0
 
-    # 🪵 16. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
+    # 🪵 17. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
     - name: Upload build logs on failure
       uses: actions/upload-artifact@v7
       if: failure()
@@ -260,7 +308,7 @@ jobs:
         if-no-files-found: ignore
         retention-days: 7
 
-    # 💾 17. 保存 ccache —— 每轮都存，下一轮靠 restore-keys 续上
+    # 💾 18. 保存 ccache —— 每轮都存，下一轮靠 restore-keys 续上
     # if: always() 让编译失败 / 中途出错时也能保住已经产出的对象文件；
     # continue-on-error 保证缓存写失败（配额、网络）不会把成功的构建判红。
     - name: Save ccache
@@ -271,7 +319,7 @@ jobs:
         path: openwrt/.ccache
         key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
 
-    # 💾 18. 保存工具链缓存 —— 只在本次是 miss 时保存，命中就不重复上传
+    # 💾 19. 保存工具链缓存 —— 只在本次是 miss 时保存，命中就不重复上传
     # （命中还上传会覆盖同名条目，且白白多花一两分钟）
     - name: Save toolchain cache
       if: always() && steps.toolchain-restore.outputs.cache-hit != 'true'
@@ -304,7 +352,7 @@ jobs:
         name: firmware-x86-64
         path: release-assets
 
-    # 🏷️ 19. 发布 Release
+    # 🏷️ 20. 发布 Release
     # tag 精度到分钟，追加 run_id 后 6 位避免同分钟构建撞 tag
     - name: Create release
       env:
@@ -345,7 +393,7 @@ jobs:
 
         echo "✅ Release 创建完成：https://github.com/$GH_REPO/releases/tag/$TAG"
 
-    # 🗑️ 20. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
+    # 🗑️ 21. 删除旧 Release（保留最新 7 个；用 JSON 解析而不是 awk 取列，
     # 避免 Title 含空格时取错 tag）
     - name: Delete old releases
       env:
