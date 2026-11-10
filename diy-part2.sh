@@ -410,6 +410,43 @@ clean_stale_artifacts() {
 }
 
 # ---------------------------------------------------------------------------
+# photondns：给 feed 里的包目录补上 Cargo 工程
+#
+# 上游 c2h2/luci-app-photondns 的仓库根是 Rust 工程（Cargo.toml / Cargo.lock /
+# build.rs / src/），三个 OpenWrt 包在 openwrt/ 子目录里。photondns 包的 Makefile
+# 用 RustBinPackage 编译「包目录里的」Cargo 工程，可包里只有 Makefile 和 root/ ——
+# 不补的话 cargo install 直接报 could not find Cargo.toml。
+# openwrt-suite 用 patches/photondns.sh 在同步时做同样的事；本仓库不走 suite，
+# 就在构建机上对 feed 克隆现场做，效果等价。feed 克隆本身就带着仓库根的工程，
+# 所以只是目录内拷贝，不需要网络；每次构建都会重做，幂等。
+# ---------------------------------------------------------------------------
+
+stage_photondns_cargo() {
+    local feed="feeds/photondns"
+    local pkg="$feed/openwrt/photondns"
+
+    [[ -d "$feed/.git" ]] ||
+        { warn "未找到 $feed（feeds update 还没跑过？），跳过 photondns Cargo stage"; return 0; }
+
+    local f
+    for f in Cargo.toml Cargo.lock build.rs src src/main.rs; do
+        [[ -e "$feed/$f" ]] ||
+            die "photondns：feed 根缺少 $f —— 上游仓库结构变了，请更新 stage_photondns_cargo"
+    done
+    [[ -f "$pkg/Makefile" ]] ||
+        die "photondns：缺少 $pkg/Makefile —— 上游目录布局变了，请更新 stage_photondns_cargo"
+
+    mkdir -p "$pkg/src"
+    rm -rf "$pkg/src/src"
+    cp -a "$feed/Cargo.toml" "$feed/Cargo.lock" "$feed/build.rs" "$pkg/src/"
+    cp -a "$feed/src" "$pkg/src/src"
+
+    [[ -f "$pkg/src/Cargo.toml" && -f "$pkg/src/src/main.rs" ]] ||
+        die "photondns：Cargo 工程 stage 后不完整"
+    log "photondns Cargo 工程已 stage 到 $pkg/src/"
+}
+
+# ---------------------------------------------------------------------------
 # 入口：执行顺序与原 compile.sh 保持一致
 # ---------------------------------------------------------------------------
 
@@ -417,6 +454,7 @@ log "开始 diy-part2 处理（工作目录：$(pwd)）"
 
 remove_official_v2ray_geodata
 install_airplay2_feed_pkgs
+stage_photondns_cargo
 fix_rust_llvm
 fix_golang_amd64
 replace_v2ray_geodata

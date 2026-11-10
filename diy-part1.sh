@@ -38,6 +38,7 @@ FEEDS=(
     "opennexttrace|https://github.com/haohaoget/luci-app-open_nexttrace.git"
     "airplay2|https://github.com/NetForgeCN/luci-app-airplay2.git;main"
     "honk|https://github.com/QiuSimons/luci-app-honk.git"
+    "photondns|https://github.com/c2h2/luci-app-photondns.git"
 )
 
 # ---------------------------------------------------------------------------
