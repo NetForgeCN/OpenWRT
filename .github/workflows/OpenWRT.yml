@@ -158,7 +158,15 @@ jobs:
         set -euo pipefail
         ZIG_VERSION=0.14.1
         BPF_LINKER_VERSION=0.11.0
-        BPF_LINKER_SHA256=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+        # zig / bpf-linker 的资产名和 sha256 随「宿主机」架构变（不是目标架构）
+        BPF_LINKER_SHA256_X86_64=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
+        BPF_LINKER_SHA256_AARCH64=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9
+        case "$(uname -m)" in
+          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64 ;;
+          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64 ;;
+          *) echo "::error::不支持的宿主机架构 $(uname -m)"; exit 1 ;;
+        esac
+        echo "honk 工具链宿主机架构：$HOST_ARCH"
 
         if ! grep -qE '^CONFIG_PACKAGE_honk=[ym]' openwrt/.config; then
           echo "未选中 honk（.config 无 CONFIG_PACKAGE_honk=y），跳过 honk 工具链安装"
@@ -176,18 +184,18 @@ jobs:
         # shellcheck disable=SC1091
         . "$HOME/.cargo/env"
 
-        if ! command -v bpf-linker >/dev/null 2>&1; then
+        if ! command -v bpf-linker >/dev/null 2>&1 || ! bpf-linker --version >/dev/null 2>&1; then
           curl -fsSL --retry 3 -o /tmp/bpf-linker.tar.zst \
-            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+            "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-${HOST_ARCH}-unknown-linux-musl.tar.zst"
           echo "${BPF_LINKER_SHA256}  /tmp/bpf-linker.tar.zst" | sha256sum -c -
           sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
         fi
 
         if ! command -v zig >/dev/null 2>&1 || [ "$(zig version)" != "$ZIG_VERSION" ]; then
           curl -fsSL --retry 3 -o /tmp/zig.tar.xz \
-            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz"
           sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
-          sudo ln -sf "/usr/local/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          sudo ln -sf "/usr/local/zig-${HOST_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
         fi
 
         zig version
