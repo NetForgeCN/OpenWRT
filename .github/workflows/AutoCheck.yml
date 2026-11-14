@@ -58,6 +58,7 @@ jobs:
           # Honk
           # Photondns
           # Nikki
+          # Mosdns
           #
           # ==================================================
           # git clone 直接克隆（diy-part2.sh）
@@ -81,6 +82,7 @@ jobs:
             ["honk"]="QiuSimons/luci-app-honk"
             ["photondns"]="c2h2/luci-app-photondns"
             ["nikki"]="nikkinikki-org/OpenWrt-nikki"
+            ["mosdns"]="sbwml/luci-app-mosdns"
             ["v2ray-geodata"]="NetForgeCN/Loyalsoldier"
             ["temp-status"]="gSpotx2f/luci-app-temp-status"
             ["argon"]="jerrykuku/luci-theme-argon"
