@@ -121,10 +121,12 @@ jobs:
             echo "检查组件：$name"
             echo "仓库地址：https://github.com/$repo"
 
+            # step 是 `set -Eeuo pipefail`：ls-remote 一旦失败（上游临时不可达、
+            # 限流、DNS 抖动），整条管道连带赋值会直接终止 step，下面那个
+            # 「保留旧 hash、继续检查其他组件」的兜底分支根本到不了。
+            # 这里单独吞掉 ls-remote 的失败，让它退化成空 hash 走兜底。
             hash="$(
-              git ls-remote \
-                "https://github.com/${repo}.git" \
-                HEAD |
+              { git ls-remote "https://github.com/${repo}.git" HEAD 2>/dev/null || true; } |
               awk 'NR == 1 { print $1 }'
             )"
 

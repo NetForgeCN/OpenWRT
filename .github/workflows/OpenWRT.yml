@@ -237,8 +237,11 @@ jobs:
             break
           fi
 
+          # grep 无匹配返回 1，在 Actions 默认的 -e 下会让整个编译 step 直接退出，
+          # 连「未能识别失败包」这句诊断都打不出来（ScriptBuild 的 compile.sh 已有
+          # 同样的 || true，这里补齐）。
           FAILED_PKGS="$(grep -oE 'ERROR: [^ ]+ failed to build' build.log \
-            | sed -E 's/^ERROR: //; s/ failed to build$//' | sort -u | tr '\n' ' ')"
+            | sed -E 's/^ERROR: //; s/ failed to build$//' | sort -u | tr '\n' ' ')" || true
 
           if [ -z "${FAILED_PKGS// /}" ]; then
             echo "::error::并行编译失败，但未能从日志中识别出失败包"
