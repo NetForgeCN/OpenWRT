@@ -69,6 +69,7 @@ jobs:
           # Argon 主题
           # Pulse
           # Oxidns
+          # Lucky（自有打包层，每日自动 pin 官网最新核心）
           #
           # ==================================================
 
@@ -88,6 +89,7 @@ jobs:
             ["argon"]="jerrykuku/luci-theme-argon"
             ["pulse"]="w9315273/luci-app-pulse"
             ["oxidns"]="NetForgeCN/luci-app-oxidns"
+            ["lucky"]="NetForgeCN/luci-app-lucky"
           )
 
           declare -A OLD_HASHES=()
