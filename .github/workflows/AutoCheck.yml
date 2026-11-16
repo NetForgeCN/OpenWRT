@@ -90,6 +90,7 @@ jobs:
             ["pulse"]="w9315273/luci-app-pulse"
             ["oxidns"]="NetForgeCN/luci-app-oxidns"
             ["lucky"]="NetForgeCN/luci-app-lucky"
+            ["openappfilter"]="destan19/OpenAppFilter"
           )
 
           declare -A OLD_HASHES=()
