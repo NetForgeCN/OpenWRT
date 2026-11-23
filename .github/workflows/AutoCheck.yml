@@ -61,7 +61,6 @@ jobs:
           # Mosdns
           # OpenAppFilter
           # AtomDNS
-          # OxiDNS Plus
           #
           # ==================================================
           # git clone 直接克隆（diy-part2.sh）
@@ -95,7 +94,6 @@ jobs:
             ["lucky"]="NetForgeCN/luci-app-lucky"
             ["openappfilter"]="destan19/OpenAppFilter"
             ["atomdns"]="NetForgeCN/luci-app-atomdns"
-            ["oxidnsplus"]="NetForgeCN/luci-app-oxidns-plus"
           )
 
           declare -A OLD_HASHES=()
