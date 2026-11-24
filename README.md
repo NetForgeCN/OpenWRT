@@ -53,7 +53,7 @@ make -j"$(nproc)"
 ## 第三方组件与配置
 
 - **第三方 feeds**：`diy-part1.sh` 内的 `FEEDS` 数组（ddnsgo、kixdns、diskman、dae、opennexttrace、airplay2、honk、photondns、nikki、mosdns、openappfilter、atomdns 等），默认分支与上游不同的仓库显式钉住分支。
-- **额外克隆仓库**：`diy-part2.sh` 内的 `EXTRA_REPOS` 数组，用于不通过 feed 提供的包。
+- **额外克隆仓库**：`diy-part2.sh` 内的 `EXTRA_REPOS` 数组，用于根目录即包目录、不通过 feed 提供的包（hevsocks5、oxidns、lucky、argon 等）。
 - **v2ray-geodata**：删除官方同名包源与链接后，克隆 `NetForgeCN/Loyalsoldier` 到 `package/v2ray-geodata`，数据取自自建规则仓库 `NetForgeCN/v2ray-rules-dat`。
 - **上游监控**：`.github/workflows/AutoCheck.yml` 内的 `REPOS` 关联数组，基线记录在 `.github/upstream-state/previous.txt`；新增或删除第三方仓库时同步更新这两处。
 - **.config**：仓库根目录，由使用者自行维护；`.github/workflows/Clean.yaml` 可手动清理历史 Release 与 workflow 记录。

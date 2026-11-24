@@ -72,6 +72,7 @@ jobs:
           # Pulse
           # Oxidns
           # Lucky（自有打包层，每日自动 pin 官网最新核心）
+          # HevSocks5（hev-socks5-server 的 LuCI 控制页）
           #
           # ==================================================
 
@@ -94,6 +95,7 @@ jobs:
             ["lucky"]="NetForgeCN/luci-app-lucky"
             ["openappfilter"]="destan19/OpenAppFilter"
             ["atomdns"]="NetForgeCN/luci-app-atomdns"
+            ["hevsocks5"]="NetForgeCN/luci-app-hevsocks5"
           )
 
           declare -A OLD_HASHES=()
