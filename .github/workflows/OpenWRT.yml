@@ -23,6 +23,14 @@ env:
   # TOPDIR 就是 openwrt/，所以构建实际读写的缓存目录在 openwrt/.ccache。
   # 这里显式钉住同一个路径，保证下面的 ccache -M 和缓存步骤操作的是同一份数据。
   CCACHE_DIR: ${{ github.workspace }}/openwrt/.ccache
+  # honk 工具链可选覆盖：留空 = 从当前 HONK_SRC_VERSION 动态解析（见 Resolve honk pins 步骤）。
+  # 可在仓库 Variables 里设置同名变量做显式覆盖，优先级高于上游动态解析。
+  HONK_ZIG_VERSION: ${{ vars.HONK_ZIG_VERSION || '' }}
+  HONK_BPF_LINKER_VERSION: ${{ vars.HONK_BPF_LINKER_VERSION || '' }}
+  HONK_ZIG_SHA256_X86_64: ${{ vars.HONK_ZIG_SHA256_X86_64 || '' }}
+  HONK_ZIG_SHA256_AARCH64: ${{ vars.HONK_ZIG_SHA256_AARCH64 || '' }}
+  HONK_BPF_LINKER_SHA256_X86_64: ${{ vars.HONK_BPF_LINKER_SHA256_X86_64 || '' }}
+  HONK_BPF_LINKER_SHA256_AARCH64: ${{ vars.HONK_BPF_LINKER_SHA256_AARCH64 || '' }}
 
 jobs:
   # ============================================================
@@ -165,27 +173,66 @@ jobs:
         ( cd openwrt && "$GITHUB_WORKSPACE/$DIY_P2_SH" )
         ( cd openwrt && make defconfig )
 
+    # 🔎 10.5 解析 honk 宿主机工具链版本/hash
+    # 按当前 honk feed Makefile 里的 HONK_SRC_VERSION 拉该 commit 的
+    # pins.env + release.yml，再按 ZIG_VERSION 从 ziglang.org/index.json 取资产 hash。
+    # 网络失败或解析失败时 honk_toolchain.sh 回退到仓库内保存的 pin（离线可用）。
+    # 显式环境变量（workflow env / 仓库 Variables）优先级最高。
+    - name: Resolve honk toolchain pins
+      id: honk-pins
+      run: |
+        set -euo pipefail
+        pins="${RUNNER_TEMP}/honk-pins.env"
+        # honk feed 的包 Makefile 在 feeds/honk/honk/Makefile（兼容 feeds/honk/Makefile）
+        mk="openwrt/feeds/honk/honk/Makefile"
+        [ -f "$mk" ] || mk="openwrt/feeds/honk/Makefile"
+        [ -f "$mk" ] || mk=""
+        bash "$GITHUB_WORKSPACE/honk_toolchain.sh" "$mk" > "$pins"
+
+        # 解析器 stdout 只有白名单 KEY=value；原样导出给后续步骤使用
+        while IFS='=' read -r key value; do
+          case "$key" in
+            ZIG_VERSION|BPF_LINKER_VERSION|BPF_LINKER_SHA256|HONK_SRC_URL|HONK_SRC_VERSION|HONK_ZIG_SHA256_X86_64|HONK_ZIG_SHA256_AARCH64|HONK_BPF_LINKER_SHA256_X86_64|HONK_BPF_LINKER_SHA256_AARCH64|HONK_PINS_SOURCE|HONK_ZIG_SHA_SOURCE) ;;
+            *) continue ;;
+          esac
+          [[ "$value" =~ ^[A-Za-z0-9._:/-]+$ ]] || {
+            echo "::error::honk 工具链解析输出不合法：$key=$value"
+            exit 1
+          }
+          echo "$key=$value" >> "$GITHUB_ENV"
+        done < "$pins"
+
+        # 与 compile.sh 一致的 guard：版本升级但 hash 未更新时明确失败
+        set -a
+        . "$pins"
+        set +a
+        bash "$GITHUB_WORKSPACE/honk_toolchain.sh" --check
+
     # 🛠️ 11. 安装 honk 宿主机工具链（仅当 .config 选中 honk 时执行）
     # honk 的核心不在 OpenWrt 构建树里交叉编译：honk/build_honk_core.sh 调用
     # 宿主机的 Rust/cargo + Zig + bpf-linker 现场编 honk-core，版本由上游钉死
     # （Zig 用 `zig version` 严格比对，不等就退出）。缺了会在 honk 包编译阶段
     # 直接失败，所以在 .config 定稿之后、make download 之前装好。
-    # 下面三个版本号必须与 openwrt-suite README「宿主机依赖（honk 核心专用）」
-    # 以及 OpenWrt-ScriptBuild/compile.sh 的 HONK_* 常量保持一致。
+    # 版本/hash 来自上一步 honk_toolchain.sh 的动态解析（离线时回退本地 pin），
+    # 本文件不再硬编码；下载后的 sha256sum -c 校验保留。
     - name: Install honk toolchain
       run: |
         set -euo pipefail
-        ZIG_VERSION=0.14.1
-        BPF_LINKER_VERSION=0.11.0
+        # 上一步导出：显式环境变量 > 上游 pins.env / release.yml > 本地回退
+        : "${ZIG_VERSION:?未解析到 zig 版本}"
+        : "${BPF_LINKER_VERSION:?未解析到 bpf-linker 版本}"
+        : "${BPF_LINKER_SHA256_X86_64:?未解析到 bpf-linker x86_64 hash}"
+        : "${BPF_LINKER_SHA256_AARCH64:?未解析到 bpf-linker aarch64 hash}"
+        : "${HONK_ZIG_SHA256_X86_64:?未解析到 zig x86_64 hash}"
+        : "${HONK_ZIG_SHA256_AARCH64:?未解析到 zig aarch64 hash}"
+        # guard：版本升级但 hash 仍是旧默认值时 clear fail（与 compile.sh 一致）
+        bash "$GITHUB_WORKSPACE/honk_toolchain.sh" --check
+        echo "honk 工具链：zig ${ZIG_VERSION}（sha 来源 ${HONK_ZIG_SHA_SOURCE:-unknown}） / bpf-linker ${BPF_LINKER_VERSION}（来源 ${HONK_PINS_SOURCE:-unknown}）"
+
         # zig / bpf-linker 的资产名和 sha256 随「宿主机」架构变（不是目标架构）。
-        # zig 的 sha256 取自 ziglang.org/download/index.json，下载后强制校验。
-        BPF_LINKER_SHA256_X86_64=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
-        BPF_LINKER_SHA256_AARCH64=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9
-        ZIG_SHA256_X86_64=24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c
-        ZIG_SHA256_AARCH64=f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b
         case "$(uname -m)" in
-          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64; ZIG_SHA256=$ZIG_SHA256_X86_64 ;;
-          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64; ZIG_SHA256=$ZIG_SHA256_AARCH64 ;;
+          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64; ZIG_SHA256=$HONK_ZIG_SHA256_X86_64 ;;
+          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64; ZIG_SHA256=$HONK_ZIG_SHA256_AARCH64 ;;
           *) echo "::error::不支持的宿主机架构 $(uname -m)"; exit 1 ;;
         esac
         echo "honk 工具链宿主机架构：$HOST_ARCH"

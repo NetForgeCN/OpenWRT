@@ -29,6 +29,19 @@ NetForgeCN 提供三套 OpenWrt x86-64 固件构建仓库，编译入口不同�
 
 产物为 `firmware-x86-64` artifact 与固件 Release（保留最近 7 个）。清理脚本会自动跳过 `backup-*` 前缀的不可变备份 Release/Tag。失败时会额外上传构建日志 artifact 便于排查。
 
+### honk 宿主机工具链
+
+`.config` 选中 honk 时，workflow 先执行 **Resolve honk toolchain pins** 步骤再安装工具链。仓库根的 `honk_toolchain.sh` 按 honk feed（`feeds/honk/honk/Makefile`，兼容 `feeds/honk/Makefile`）当前的 `HONK_SRC_URL` / `HONK_SRC_VERSION` 拉取该 commit 的 `.github/ci/pins.env`（`BPF_LINKER_VERSION` / `BPF_LINKER_SHA256`）和 `.github/workflows/release.yml`（setup-zig 的 `version`），再按版本从 `https://ziglang.org/download/index.json` 的 `x86_64-linux` / `aarch64-linux` 条目读取 zig 资产 hash。结果写入 `GITHUB_ENV` 供安装步骤使用，日志会打印来源（`upstream` / `zig-index`）与版本；**上游升级 honk commit 后不需要手改 workflow 里的版本或 4 个 hash**。
+
+优先级：**显式环境变量 > 上游动态解析 > 本地回退 pin**。网络不可达或解析失败时回退到脚本内保存的当前 pin（zig `0.14.1`、bpf-linker `0.11.0` 及 4 个 SHA256），离线机器仍能编译，日志会标出 `local-fallback` / `local-default`。显式覆盖可用 workflow `env` 或仓库 Variables：`HONK_ZIG_VERSION`、`HONK_BPF_LINKER_VERSION`、`HONK_ZIG_SHA256_X86_64` / `HONK_ZIG_SHA256_AARCH64`、`HONK_BPF_LINKER_SHA256_X86_64` / `HONK_BPF_LINKER_SHA256_AARCH64`；`HONK_SRC_URL` / `HONK_SRC_VERSION` / `HONK_ZIG_INDEX_URL` 可指定解析源（一般无需设置）。
+
+下载后的 `sha256sum -c` 强制校验保留；版本升级但对应 hash 仍是旧默认值时，`honk_toolchain.sh --check` 会 fail closed 并给出清晰错误（上游 `pins.env` 只提供 x86_64 bpf-linker hash，aarch64 升级时需显式设置 `HONK_BPF_LINKER_SHA256_AARCH64`）。本地查看解析结果：
+
+```bash
+bash honk_toolchain.sh openwrt/feeds/honk/honk/Makefile   # 有该 feed 检出时（兼容 feeds/honk/Makefile）
+bash honk_toolchain.sh                               # 无 feed 时使用本地回退 pin
+```
+
 ### 本地使用两个 diy 脚本
 
 `diy-part1.sh` 与 `diy-part2.sh` 均在 **OpenWrt 源码树根目录**运行，按 workflow 的时机调用：
