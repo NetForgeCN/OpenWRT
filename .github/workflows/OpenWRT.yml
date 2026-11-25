@@ -221,8 +221,9 @@ jobs:
         # 上一步导出：显式环境变量 > 上游 pins.env / release.yml > 本地回退
         : "${ZIG_VERSION:?未解析到 zig 版本}"
         : "${BPF_LINKER_VERSION:?未解析到 bpf-linker 版本}"
-        : "${BPF_LINKER_SHA256_X86_64:?未解析到 bpf-linker x86_64 hash}"
-        : "${BPF_LINKER_SHA256_AARCH64:?未解析到 bpf-linker aarch64 hash}"
+        # 解析器输出的是 HONK_ 前缀变量（见 honk_toolchain.sh 的 stdout 契约）
+        : "${HONK_BPF_LINKER_SHA256_X86_64:?未解析到 bpf-linker x86_64 hash}"
+        : "${HONK_BPF_LINKER_SHA256_AARCH64:?未解析到 bpf-linker aarch64 hash}"
         : "${HONK_ZIG_SHA256_X86_64:?未解析到 zig x86_64 hash}"
         : "${HONK_ZIG_SHA256_AARCH64:?未解析到 zig aarch64 hash}"
         # guard：版本升级但 hash 仍是旧默认值时 clear fail（与 compile.sh 一致）
@@ -231,8 +232,8 @@ jobs:
 
         # zig / bpf-linker 的资产名和 sha256 随「宿主机」架构变（不是目标架构）。
         case "$(uname -m)" in
-          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64; ZIG_SHA256=$HONK_ZIG_SHA256_X86_64 ;;
-          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64; ZIG_SHA256=$HONK_ZIG_SHA256_AARCH64 ;;
+          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$HONK_BPF_LINKER_SHA256_X86_64; ZIG_SHA256=$HONK_ZIG_SHA256_X86_64 ;;
+          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$HONK_BPF_LINKER_SHA256_AARCH64; ZIG_SHA256=$HONK_ZIG_SHA256_AARCH64 ;;
           *) echo "::error::不支持的宿主机架构 $(uname -m)"; exit 1 ;;
         esac
         echo "honk 工具链宿主机架构：$HOST_ARCH"
