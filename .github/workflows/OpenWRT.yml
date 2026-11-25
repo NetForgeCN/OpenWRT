@@ -265,10 +265,27 @@ jobs:
         fi
 
         if ! command -v zig >/dev/null 2>&1 || [ "$(zig version)" != "$ZIG_VERSION" ]; then
-          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 900 \
-            -o "$RUNNER_TEMP/zig.tar.xz" \
-            "https://ziglang.org/download/${ZIG_VERSION}/zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz"
-          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          # 官方 ziglang.org 在 CI 出口常只有几十 KB/s，49MB 包会超时；
+          # 改用 zig 官方 community-mirrors 里的高速镜像，逐个尝试并校验 sha256。
+          zig_tarball="zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz"
+          zig_ok=0
+          for url in \
+            "https://zigmirror.com/${zig_tarball}" \
+            "https://zig.mirror.mschae23.de/zig/${zig_tarball}" \
+            "https://pkg.earth/zig/${zig_tarball}" \
+            "https://ziglang.org/download/${ZIG_VERSION}/${zig_tarball}"; do
+            echo "尝试下载 zig：${url}"
+            if curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                -fsSL --connect-timeout 15 --max-time 180 -o "$RUNNER_TEMP/zig.tar.xz" "$url" &&
+               echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c - >/dev/null 2>&1; then
+              echo "zig 下载并校验通过：${url}"
+              zig_ok=1
+              break
+            fi
+            echo "镜像下载/校验失败：${url}"
+            rm -f "$RUNNER_TEMP/zig.tar.xz"
+          done
+          [ "$zig_ok" = 1 ] || { echo "::error::下载 zig 失败（所有镜像均不可用）"; exit 1; }
           sudo tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C /usr/local
           sudo ln -sf "/usr/local/zig-${HOST_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
         fi
