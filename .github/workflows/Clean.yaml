@@ -24,12 +24,16 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # 显式传入，避免把 ${{ github.repository }} 直接插进 shell 脚本
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Delete Old Releases and Associated Tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEEP_COUNT: ${{ github.event.inputs.keep_releases }}
         run: |
+          set -euo pipefail
           # 校验输入：必须是 >=1 的数字，防止手滑输入 0 删光全部 Release
           case "$KEEP_COUNT" in
             ''|*[!0-9]*)
@@ -44,19 +48,23 @@ jobs:
 
           echo "=== 开始清理 Releases，保留最新 ${KEEP_COUNT} 个 ==="
 
-          releases_json=$(gh release list --repo ${{ github.repository }} --limit 1000 --json tagName)
-          releases_to_delete=$(echo "$releases_json" | jq -r ".[${KEEP_COUNT}:][].tagName")
+          # 按 createdAt 倒序（API 返回顺序无保证）；永不碰 backup-* 不可变备份
+          releases_json=$(gh release list --repo "$GH_REPO" --limit 1000 --json tagName,createdAt)
+          releases_to_delete=$(printf '%s' "$releases_json" |
+            jq -r --argjson keep "$KEEP_COUNT" \
+              'sort_by(.createdAt) | reverse | map(select(.tagName | startswith("backup-") | not)) | .[$keep:][].tagName')
 
           if [ -z "$releases_to_delete" ]; then
             echo "没有需要删除的 Release"
           else
-            for tag in $releases_to_delete; do
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
               echo "正在删除 Release: $tag"
-              gh release delete "$tag" --repo ${{ github.repository }} -y || true
+              gh release delete "$tag" --repo "$GH_REPO" -y || true
 
               echo "正在强制彻底删除远端 Git Tag: $tag"
-              gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$tag || true
-            done
+              gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" || true
+            done <<< "$releases_to_delete"
           fi
 
       - name: Delete Orphan/Remaining Old Git Tags
@@ -64,6 +72,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEEP_COUNT: ${{ github.event.inputs.keep_releases }}
         run: |
+          set -euo pipefail
           echo "=== 检查并清理孤立的旧 Git Tags（保留最新的 ${KEEP_COUNT} 个 Tag）==="
 
           case "$KEEP_COUNT" in
@@ -77,17 +86,19 @@ jobs:
             exit 1
           fi
 
-          # 注意：tags API 的顺序没有官方保证，目前依赖 tag 名可按时序排序
-          # （OpenWrt-YYYYMMDD-HHMM 格式恰好满足）。手动打了其他名字的 tag 后请人工核对。
-          tags_to_delete=$(gh api repos/${{ github.repository }}/tags --paginate -q '.[].name' | tail -n +$((KEEP_COUNT + 1)))
+          # 先按 tag 名排序（OpenWrt-YYYYMMDD-HHMM 可按时序排），再排除 backup-*，
+          # 最后只保留最新 KEEP_COUNT 个；tag 名含空格/元字符时用 read -r 逐行读取。
+          tags_to_delete=$(gh api "repos/$GH_REPO/tags" --paginate --jq \
+            '[.[].name] | sort | reverse | map(select(startswith("backup-") | not)) | .['"${KEEP_COUNT}"':][]')
 
           if [ -z "$tags_to_delete" ]; then
             echo "没有多余的 Git Tag 需要清理"
           else
-            for tag in $tags_to_delete; do
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
               echo "正在删除残留 Git Tag: $tag"
-              gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$tag || true
-            done
+              gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$tag" || true
+            done <<< "$tags_to_delete"
           fi
 
       - name: Delete Old Workflow Runs
@@ -95,6 +106,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           KEEP_COUNT: ${{ github.event.inputs.keep_runs }}
         run: |
+          set -euo pipefail
           echo "=== 开始清理 Workflow Runs，保留最新 ${KEEP_COUNT} 个 ==="
 
           case "$KEEP_COUNT" in
@@ -108,13 +120,14 @@ jobs:
             exit 1
           fi
 
-          runs_to_delete=$(gh api repos/${{ github.repository }}/actions/runs --paginate -q '.workflow_runs[].id' | tail -n +$((KEEP_COUNT + 1)))
+          runs_to_delete=$(gh api "repos/$GH_REPO/actions/runs" --paginate --jq '.workflow_runs[].id' | tail -n +$((KEEP_COUNT + 1)))
 
           if [ -z "$runs_to_delete" ]; then
             echo "没有需要删除的 Workflow Run"
           else
-            for run_id in $runs_to_delete; do
+            while IFS= read -r run_id; do
+              [ -n "$run_id" ] || continue
               echo "正在删除 Run ID: $run_id"
-              gh api -X DELETE repos/${{ github.repository }}/actions/runs/$run_id || true
-            done
+              gh api -X DELETE "repos/$GH_REPO/actions/runs/$run_id" || true
+            done <<< "$runs_to_delete"
           fi

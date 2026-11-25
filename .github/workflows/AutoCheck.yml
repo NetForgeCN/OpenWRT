@@ -8,8 +8,9 @@ on:
   schedule:
     - cron: '17 21 * * *'
 
+# 默认只读；只有 check job 里的状态提交/派发需要写权限
 permissions:
-  contents: write
+  contents: read
 
 # 防止多个检查任务同时修改状态文件
 concurrency:
@@ -20,6 +21,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write   # 保存状态文件 + 派发 repository_dispatch
 
     steps:
       # ======================================================
@@ -27,7 +30,7 @@ jobs:
       # ======================================================
 
       - name: Checkout workflow repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # ======================================================
       # 2. 检查全部第三方组件
@@ -41,8 +44,11 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          STATE_FILE=".github/upstream-state/previous.txt"
-          TEMP_FILE="$(mktemp)"
+          STATE_DIR=".github/upstream-state"
+          STATE_FILE="$STATE_DIR/previous.txt"
+          mkdir -p "$STATE_DIR"
+          # 临时文件与状态文件同目录，最后 mv 原子替换，避免中途失败留下半截状态
+          TEMP_FILE="$(mktemp "$STATE_DIR/.previous.txt.XXXXXX")"
           trap 'rm -f "$TEMP_FILE"' EXIT
 
           # ==================================================
@@ -132,11 +138,14 @@ jobs:
             # step 是 `set -Eeuo pipefail`：ls-remote 一旦失败（上游临时不可达、
             # 限流、DNS 抖动），整条管道连带赋值会直接终止 step，下面那个
             # 「保留旧 hash、继续检查其他组件」的兜底分支根本到不了。
-            # 这里单独吞掉 ls-remote 的失败，让它退化成空 hash 走兜底。
-            hash="$(
-              { git ls-remote "https://github.com/${repo}.git" HEAD 2>/dev/null || true; } |
-              awk 'NR == 1 { print $1 }'
-            )"
+            # 这里单独吞掉失败并有限重试（3 次），最后才退化成空 hash 走兜底；
+            # GIT_TERMINAL_PROMPT=0 防止凭据交互卡住定时任务。
+            hash=""
+            for attempt in 1 2 3; do
+              hash="$(GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/${repo}.git" HEAD 2>/dev/null | awk 'NR == 1 { print $1 }')" || hash=""
+              if [ -n "$hash" ]; then break; fi
+              if [ "$attempt" -lt 3 ]; then sleep 2; fi
+            done
 
             # 单个仓库检查失败不再让整个监控挂掉：
             # 保留旧 hash、继续检查其他组件，最后统一标记失败
@@ -145,7 +154,10 @@ jobs:
               FAILED="$FAILED $name"
 
               old_hash="${OLD_HASHES[$name]:-}"
-              [ -n "$old_hash" ] && printf '%s %s\n' "$name" "$old_hash" >> "$TEMP_FILE"
+              # set -e 下裸 `[ -n ... ] && ...` 在条件为假时会终止整个 step
+              if [ -n "$old_hash" ]; then
+                printf '%s %s\n' "$name" "$old_hash" >> "$TEMP_FILE"
+              fi
               continue
             fi
 
@@ -178,8 +190,9 @@ jobs:
           mkdir -p "$(dirname "$STATE_FILE")"
           sort -o "$TEMP_FILE" "$TEMP_FILE"
 
-          # 保存本次检查结果
-          cp "$TEMP_FILE" "$STATE_FILE"
+          # 保存本次检查结果：同目录原子替换（mktemp 默认 0600，显式恢复 644）
+          chmod 644 "$TEMP_FILE"
+          mv -f "$TEMP_FILE" "$STATE_FILE" || { echo "::error::保存状态文件失败"; exit 1; }
 
           echo
           echo "=================================================="
@@ -221,7 +234,8 @@ jobs:
             echo "上游状态文件没有变化，无需提交。"
           else
             git commit -m "chore: update third-party upstream state"
-            git pull --rebase origin main || true
+            # rebase 失败必须让 step 失败；忽略后再 push 会写入过期状态或静默丢失提交
+            git pull --rebase origin main || { echo "::error::rebase 上游失败"; exit 1; }
             git push
             echo "✅ 上游提交状态已保存。"
           fi
@@ -234,7 +248,7 @@ jobs:
         if: |
           steps.check.outputs.baseline == 'false' &&
           steps.check.outputs.updated == 'true'
-        uses: peter-evans/repository-dispatch@v4
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: Upstream Triggered Build

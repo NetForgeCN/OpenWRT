@@ -46,6 +46,11 @@ CLEAN_KERNEL="${CLEAN_KERNEL:-auto}"        # auto|1|0：内核配置变更后�
 CLEAN_GOLANG="${CLEAN_GOLANG:-auto}"        # auto|1|0：GO_AMD64 变更后是否 make golang/clean
 SKIP_UPDATE="${SKIP_UPDATE:-0}"             # 1 = 不更新第三方仓库（CI 全新克隆，无需设置）
 
+# GO_AMD64_LEVEL 会被拼进 sed 表达式，必须在任何 sed 调用前严格白名单校验，
+# 否则形如 `v3&` / `v3/..` 的取值会破坏 sed 脚本（命令注入/配置损坏）。
+[[ "$GO_AMD64_LEVEL" =~ ^v[1-4]$ ]] ||
+    { printf '\n[diy2][错误] GO_AMD64_LEVEL 必须是 v1/v2/v3/v4，当前值：%s\n' "$GO_AMD64_LEVEL" >&2; exit 1; }
+
 # 内部状态标记（先给默认值，避免未绑定变量）
 RUST_CHANGED=0
 GOLANG_CHANGED=0
@@ -102,13 +107,44 @@ on_err() {
 trap 'cleanup' EXIT
 trap 'on_err "$LINENO" "$BASH_COMMAND"' ERR
 
-# 可移植的「原地修改」：不走 sed -i（BSD/GNU 行为不一致），且保留原 inode 与权限
+# ---------------------------------------------------------------------------
+# 同目录临时文件 + mv 原子替换；保留原权限/所有者，首次改动前备份以便回滚。
+# 拒绝编辑符号链接，避免把内容写到源码树之外。
+# ---------------------------------------------------------------------------
+
+atomic_replace() {
+    local src="$1" dest="$2" bak tmp
+    [[ -f "$src" ]] || { warn "atomic_replace: 源文件不存在：$src"; return 1; }
+    [[ -f "$dest" && ! -L "$dest" ]] || { warn "atomic_replace: 目标不是普通文件（或为符号链接）：$dest"; return 1; }
+    mkdir -p -- "${TMP_WORK}/backups" || return 1
+    bak="${TMP_WORK}/backups/$(printf '%s' "$dest" | tr '/' '_').bak"
+    if [[ ! -e "$bak" ]]; then
+        cp -p -- "$dest" "$bak" || return 1
+    fi
+    tmp="$(mktemp "$(dirname "$dest")/.$(basename "$dest").tmp.XXXXXX")" || return 1
+    cp -p -- "$dest" "$tmp" || { rm -f -- "$tmp"; return 1; }
+    cat -- "$src" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+}
+
+rollback_file() {
+    local dest="$1"
+    local bak="${TMP_WORK}/backups/$(printf '%s' "$dest" | tr '/' '_').bak"
+    [[ -f "$bak" ]] || return 1
+    cp -p -- "$bak" "$dest"
+}
+
+# 可移植的「原地修改」：不走 sed -i（BSD/GNU 行为不一致），且保留原权限
 sed_inplace() {
     local expr="$1" file="$2" tmp
-    [[ -f "$file" ]] || { warn "sed_inplace: 文件不存在：$file"; return 1; }
+    [[ -f "$file" && ! -L "$file" ]] || { warn "sed_inplace: 文件不存在或为符号链接：$file"; return 1; }
     tmp="${TMP_WORK}/$(basename "$file").sed.$$"
     sed -E "$expr" "$file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
-    cat -- "$tmp" > "$file" || { rm -f -- "$tmp"; return 1; }
+    atomic_replace "$tmp" "$file" || {
+        rm -f -- "$tmp"
+        rollback_file "$file" || true
+        return 1
+    }
     rm -f -- "$tmp"
 }
 
@@ -124,6 +160,23 @@ repo_is_dirty() {
         ! git -C "$1" diff --cached --quiet --ignore-submodules -- 2>/dev/null
 }
 
+# 网络抖动时有限重试克隆；每次失败后清掉不完整的目标目录再试。
+clone_repo() {
+    local url="$1" dir="$2" n=1
+    while :; do
+        if git clone "$url" "$dir"; then
+            return 0
+        fi
+        rm -rf -- "$dir" || true
+        if (( n >= 3 )); then
+            return 1
+        fi
+        warn "克隆失败，5 秒后重试（$n/3）：$url"
+        n=$((n + 1))
+        sleep 5
+    done
+}
+
 # 克隆或更新一个 Git 仓库（不锁定版本，跟随默认分支）
 ensure_repo() {
     local url="$1" dir="$2" parent
@@ -133,7 +186,7 @@ ensure_repo() {
 
     if [[ ! -e "$dir" && ! -L "$dir" ]]; then
         log "首次克隆：$dir"
-        git clone "$url" "$dir"
+        clone_repo "$url" "$dir" || die "克隆失败：$url -> $dir"
         return 0
     fi
 
@@ -200,19 +253,23 @@ remove_official_v2ray_geodata() {
 
     # 关键：feeds install 会在 package/feeds/<feed>/ 下生成指向源的符号链接，
     # 只删源会留下悬空链接，后续扫描包时会报错，这里必须一并清理。
-    local link
+    # 用临时文件代替进程替换，保证 sh -n / bash 3.2 也能解析。
+    local link links="${TMP_WORK}/v2ray-geodata-links.$$"
+    find package/feeds -maxdepth 2 -name 'v2ray-geodata' -type l -print 2>/dev/null > "$links" || true
     while IFS= read -r link; do
         [[ -n "$link" ]] || continue
         rm -f -- "$link"
         log "已删除失效符号链接：$link"
-    done < <(find package/feeds -maxdepth 2 -name 'v2ray-geodata' -type l -print 2>/dev/null || true)
+    done < "$links"
+    rm -f -- "$links"
 }
 
 replace_v2ray_geodata() {
     log "替换 v2ray-geodata"
 
     rm -rf -- "$V2RAY_GEODATA_DIR"
-    git clone "$V2RAY_GEODATA_REPO" "$V2RAY_GEODATA_DIR"
+    clone_repo "$V2RAY_GEODATA_REPO" "$V2RAY_GEODATA_DIR" ||
+        die "克隆 v2ray-geodata 失败：$V2RAY_GEODATA_REPO"
 
     [[ -f "$V2RAY_GEODATA_DIR/Makefile" ]] ||
         die "第三方 v2ray-geodata 克隆结果异常：缺少 Makefile"
@@ -357,7 +414,11 @@ set_kernel_config() {
     ' "$file" > "$tmp"
 
     printf '%s\n' "$value" >> "$tmp"
-    cat -- "$tmp" > "$file"     # 保留原 inode / 权限 / 所有者
+    atomic_replace "$tmp" "$file" || {
+        rm -f -- "$tmp"
+        rollback_file "$file" || true
+        die "写入内核配置失败（已尝试回滚）：$file"
+    }
     rm -f -- "$tmp"
 
     log "已写入：${value}"
