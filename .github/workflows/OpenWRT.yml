@@ -208,6 +208,14 @@ jobs:
         set +a
         bash "$GITHUB_WORKSPACE/honk_toolchain.sh" --check
 
+    # Zig 走上游同款 setup-zig Action：多镜像 + minisign 验签 + 工具缓存，
+    # 版本来自上一步解析的 ZIG_VERSION（不写死）。装好后 PATH 里有 zig，
+    # 下面的 Install honk toolchain 步骤会检测到版本匹配而跳过自带下载。
+    - name: Setup Zig for honk
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+      with:
+        version: ${{ env.ZIG_VERSION }}
+
     # 🛠️ 11. 安装 honk 宿主机工具链（仅当 .config 选中 honk 时执行）
     # honk 的核心不在 OpenWrt 构建树里交叉编译：honk/build_honk_core.sh 调用
     # 宿主机的 Rust/cargo + Zig + bpf-linker 现场编 honk-core，版本由上游钉死
