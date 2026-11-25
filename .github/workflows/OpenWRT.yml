@@ -39,7 +39,7 @@ jobs:
     # persist-credentials: false —— 不把 token 留在 .git/config 里，
     # 第三方 Makefile 即使恶意也无法读取凭据
     - name: Checkout repository
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       with:
         persist-credentials: false
 
@@ -67,11 +67,18 @@ jobs:
     # 这样 `git log -- tools toolchain` 才能算出稳定的缓存 key
     - name: Clone source
       run: |
+        set -euo pipefail
         git clone -b "$REPO_BRANCH" "$REPO_URL" openwrt
-        cd openwrt
-        OPENWRT_COMMIT=$(git rev-parse HEAD)
+        OPENWRT_COMMIT=$(git -C openwrt rev-parse HEAD)
         echo "OpenWrt commit: $OPENWRT_COMMIT"
         echo "OPENWRT_COMMIT=$OPENWRT_COMMIT" >> "$GITHUB_ENV"
+        # 可复现构建：以源码 HEAD 的提交时间作为 SOURCE_DATE_EPOCH
+        EPOCH=$(git -C openwrt log -1 --format=%ct)
+        case "$EPOCH" in
+          ''|*[!0-9]*) echo "::error::无法获取有效的 SOURCE_DATE_EPOCH"; exit 1 ;;
+        esac
+        echo "SOURCE_DATE_EPOCH=$EPOCH" >> "$GITHUB_ENV"
+        echo "SOURCE_DATE_EPOCH=$EPOCH"
 
     # 🔑 4. 计算工具链 hash，作为缓存 key 的一部分
     - name: Compute toolchain hash
@@ -87,7 +94,7 @@ jobs:
     # 之后新增的源码包永远要重新下载，只能靠手改 -v1 才能更新。
     # 现在 .config / diy-part*.sh 变了才换 key，其余时候仍然命中同一份快照。
     - name: Cache dl
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: openwrt/dl
         key: dl-${{ runner.os }}-x86-${{ hashFiles('.config', 'diy-part1.sh', 'diy-part2.sh') }}
@@ -100,7 +107,7 @@ jobs:
     # staging_dir 存下来，下次不必从零重来。
     - name: Restore toolchain cache
       id: toolchain-restore
-      uses: actions/cache/restore@v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: openwrt/staging_dir
         key: toolchain-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}
@@ -113,7 +120,7 @@ jobs:
     # 命中上一轮，超出配额时由 GitHub 按 LRU 淘汰最老的几代。
     - name: Restore ccache
       id: ccache-restore
-      uses: actions/cache/restore@v6
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: openwrt/.ccache
         key: ccache-${{ runner.os }}-x86-${{ steps.toolchain-hash.outputs.hash }}-${{ github.run_id }}
@@ -132,9 +139,21 @@ jobs:
     # ⚙️ 9. 更新 & 安装 feeds
     - name: Update feeds
       run: |
+        set -euo pipefail
         cd openwrt
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        # feeds 更新经常因上游网络抖动失败，有限重试后再放弃
+        for attempt in 1 2 3; do
+          if ./scripts/feeds update -a; then break; fi
+          [ "$attempt" -lt 3 ] || exit 1
+          echo "::warning::feeds update 失败，5 秒后重试（$attempt/3）"
+          sleep 5
+        done
+        for attempt in 1 2 3; do
+          if ./scripts/feeds install -a; then break; fi
+          [ "$attempt" -lt 3 ] || exit 1
+          echo "::warning::feeds install 失败，5 秒后重试（$attempt/3）"
+          sleep 5
+        done
 
     # 📝 10. 加载自定义配置 (.config & diy-part2.sh)
     - name: Load custom configuration
@@ -158,12 +177,15 @@ jobs:
         set -euo pipefail
         ZIG_VERSION=0.14.1
         BPF_LINKER_VERSION=0.11.0
-        # zig / bpf-linker 的资产名和 sha256 随「宿主机」架构变（不是目标架构）
+        # zig / bpf-linker 的资产名和 sha256 随「宿主机」架构变（不是目标架构）。
+        # zig 的 sha256 取自 ziglang.org/download/index.json，下载后强制校验。
         BPF_LINKER_SHA256_X86_64=10f62ba9ab7e544d538370552660efcb4f1a19153d5752bbf0f6b51f3bada450
         BPF_LINKER_SHA256_AARCH64=d09ddd83303e9ab1443f51e0e284680154009646a3ce141c63d838ee61b73eb9
+        ZIG_SHA256_X86_64=24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c
+        ZIG_SHA256_AARCH64=f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b
         case "$(uname -m)" in
-          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64 ;;
-          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64 ;;
+          x86_64|amd64)  HOST_ARCH=x86_64;  BPF_LINKER_SHA256=$BPF_LINKER_SHA256_X86_64; ZIG_SHA256=$ZIG_SHA256_X86_64 ;;
+          aarch64|arm64) HOST_ARCH=aarch64; BPF_LINKER_SHA256=$BPF_LINKER_SHA256_AARCH64; ZIG_SHA256=$ZIG_SHA256_AARCH64 ;;
           *) echo "::error::不支持的宿主机架构 $(uname -m)"; exit 1 ;;
         esac
         echo "honk 工具链宿主机架构：$HOST_ARCH"
@@ -178,23 +200,28 @@ jobs:
         sudo apt-get -qq install -y libbpf-dev cmake libclang-dev zstd xz-utils pkg-config
 
         if ! command -v cargo >/dev/null 2>&1; then
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 120 \
+            https://sh.rustup.rs -o "$RUNNER_TEMP/rustup-init.sh"
+          sh "$RUNNER_TEMP/rustup-init.sh" -y --profile minimal
         fi
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         # shellcheck disable=SC1091
         . "$HOME/.cargo/env"
 
         if ! command -v bpf-linker >/dev/null 2>&1 || ! bpf-linker --version >/dev/null 2>&1; then
-          curl -fsSL --retry 3 -o /tmp/bpf-linker.tar.zst \
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+            -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
             "https://github.com/aya-rs/bpf-linker/releases/download/v${BPF_LINKER_VERSION}/bpf-linker-${HOST_ARCH}-unknown-linux-musl.tar.zst"
-          echo "${BPF_LINKER_SHA256}  /tmp/bpf-linker.tar.zst" | sha256sum -c -
-          sudo tar --zstd -xf /tmp/bpf-linker.tar.zst -C /usr/local/bin
+          echo "${BPF_LINKER_SHA256}  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
+          sudo tar --zstd -xf "$RUNNER_TEMP/bpf-linker.tar.zst" -C /usr/local/bin
         fi
 
         if ! command -v zig >/dev/null 2>&1 || [ "$(zig version)" != "$ZIG_VERSION" ]; then
-          curl -fsSL --retry 3 -o /tmp/zig.tar.xz \
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 15 --max-time 900 \
+            -o "$RUNNER_TEMP/zig.tar.xz" \
             "https://ziglang.org/download/${ZIG_VERSION}/zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz"
-          sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          sudo tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C /usr/local
           sudo ln -sf "/usr/local/zig-${HOST_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
         fi
 
@@ -249,7 +276,10 @@ jobs:
           fi
 
           echo "⚠️ 失败包：${FAILED_PKGS}"
-          for pkg in $FAILED_PKGS; do
+          # 数组遍历，避免裸变量展开时的 glob / 额外分词
+          FAILED_PKGS_ARRAY=()
+          read -r -a FAILED_PKGS_ARRAY <<< "$FAILED_PKGS"
+          for pkg in "${FAILED_PKGS_ARRAY[@]}"; do
             log="retry-$(printf '%s' "$pkg" | tr '/' '_').log"
             echo ">>> 单包重建：$pkg"
             make "${pkg}/clean" || true
@@ -297,7 +327,7 @@ jobs:
     # 固件本身已经是 .img.gz，再压缩一遍纯属浪费几分钟，保留原始字节。
     # retention-days：Release 建好后 artifact 就没用了，不必占用 90 天。
     - name: Upload firmware artifact
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: firmware-x86-64
         path: release-assets/
@@ -307,7 +337,7 @@ jobs:
 
     # 🪵 17. 编译失败时上传完整日志（tee 出来的 build.log 一定有内容）
     - name: Upload build logs on failure
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       if: failure()
       with:
         name: openwrt-build-logs
@@ -325,7 +355,7 @@ jobs:
     - name: Save ccache
       if: always()
       continue-on-error: true
-      uses: actions/cache/save@v6
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: openwrt/.ccache
         key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
@@ -335,7 +365,7 @@ jobs:
     - name: Save toolchain cache
       if: always() && steps.toolchain-restore.outputs.cache-hit != 'true'
       continue-on-error: true
-      uses: actions/cache/save@v6
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: openwrt/staging_dir
         key: ${{ steps.toolchain-restore.outputs.cache-primary-key }}
@@ -358,7 +388,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
     steps:
     - name: Download firmware artifact
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
       with:
         name: firmware-x86-64
         path: release-assets
@@ -416,11 +446,12 @@ jobs:
         # 1) 同样必须带 --repo：本 job 没有 git 仓库，否则和 create 一样报错
         # 2) 用命令替换而不是管道：gh 失败会被 set -e 捕获，不会被管道吞掉
         # 3) 按 createdAt 显式倒序，不依赖 API 的返回顺序
+        # 4) 永不删除 backup-* 标签/Release（审计前不可变备份）
         LIST="$(gh release list \
           --repo "$GH_REPO" \
           --limit 100 \
           --json tagName,createdAt \
-          --jq 'sort_by(.createdAt) | reverse | .[].tagName')"
+          --jq 'sort_by(.createdAt) | reverse | map(select(startswith("backup-") | not)) | .[].tagName')"
 
         TAGS=()
         while IFS= read -r line; do

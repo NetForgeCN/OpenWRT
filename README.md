@@ -25,7 +25,9 @@ NetForgeCN 提供三套 OpenWrt x86-64 固件构建仓库，编译入口不同�
 
 构建步骤依次为：克隆 OpenWrt 源码 → 恢复 dl / 工具链 / ccache 缓存 → 运行 `diy-part1.sh` 配置 feeds → `feeds update -a` / `feeds install -a` → 写入 `.config` 并运行 `diy-part2.sh` → `make defconfig` → 按需安装 honk 宿主机工具链 → `make download` → 编译 → 收集固件 → 上传 artifact → 保存缓存 → 发布 Release。构建使用 `ubuntu-26.04` runner，单次超时 360 分钟，同一 workflow 的构建排队执行不取消。
 
-产物为 `firmware-x86-64` artifact 与固件 Release（保留最近 7 个）。失败时会额外上传构建日志 artifact 便于排查。
+可复现性：`SOURCE_DATE_EPOCH` 取 OpenWrt 源码 HEAD 的提交时间（可在 workflow env 中覆盖）；配置与 feeds 文件均通过「同目录临时文件 + `mv`」原子替换，写入前备份、失败回滚。供应链：workflow 里的 Actions 全部钉到 commit SHA；honk 宿主机工具链资产（bpf-linker、zig）下载后强制校验 SHA256，zig 的校验值取自 ziglang.org 官方索引。
+
+产物为 `firmware-x86-64` artifact 与固件 Release（保留最近 7 个）。清理脚本会自动跳过 `backup-*` 前缀的不可变备份 Release/Tag。失败时会额外上传构建日志 artifact 便于排查。
 
 ### 本地使用两个 diy 脚本
 
