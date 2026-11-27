@@ -35,6 +35,8 @@ NetForgeCN 提供三套 OpenWrt x86-64 固件构建仓库，编译入口不同�
 
 优先级：**显式环境变量 > 上游动态解析 > 本地回退 pin**。网络不可达或解析失败时回退到脚本内保存的当前 pin（zig `0.14.1`、bpf-linker `0.11.0` 及 4 个 SHA256），离线机器仍能编译，日志会标出 `local-fallback` / `local-default`。显式覆盖可用 workflow `env` 或仓库 Variables：`HONK_ZIG_VERSION`、`HONK_BPF_LINKER_VERSION`、`HONK_ZIG_SHA256_X86_64` / `HONK_ZIG_SHA256_AARCH64`、`HONK_BPF_LINKER_SHA256_X86_64` / `HONK_BPF_LINKER_SHA256_AARCH64`；`HONK_SRC_URL` / `HONK_SRC_VERSION` / `HONK_ZIG_INDEX_URL` 可指定解析源（一般无需设置）。
 
+上游自 2026-11 起把 zig 改成 latest（release.yml 里已无 setup-zig pin）：此时 bpf-linker 仍从上游 `pins.env` 取，zig 版本回落到本地 pin（0.14.1），日志会明确提示。另外 `honk` feed 已改名为 `luci-app-daeuniverse`（honk + dae 双核心），feed 短名仍为 `honk`，所以 `feeds/honk/honk/Makefile` 路径不变；独立的旧 `luci-app-dae`（kix）已从 feeds 移除以避免同名 dae 包冲突。
+
 下载后的 `sha256sum -c` 强制校验保留；版本升级但对应 hash 仍是旧默认值时，`honk_toolchain.sh --check` 会 fail closed 并给出清晰错误（上游 `pins.env` 只提供 x86_64 bpf-linker hash，aarch64 升级时需显式设置 `HONK_BPF_LINKER_SHA256_AARCH64`）。本地查看解析结果：
 
 ```bash

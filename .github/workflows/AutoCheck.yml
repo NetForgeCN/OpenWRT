@@ -86,10 +86,10 @@ jobs:
             ["ddnsgo"]="sirpdboy/luci-app-ddns-go"
             ["kixdns"]="JohnsonRan/luci-app-kixdns"
             ["diskman"]="sbwml/luci-app-diskman"
-            ["dae"]="QiuSimons/luci-app-dae"
             ["opennexttrace"]="haohaoget/luci-app-open_nexttrace"
             ["airplay2"]="NetForgeCN/luci-app-airplay2"
-            ["honk"]="QiuSimons/luci-app-honk"
+            # honk 与 dae 已整合进 luci-app-daeuniverse（旧 luci-app-dae 归档）
+            ["honk"]="QiuSimons/luci-app-daeuniverse"
             ["photondns"]="c2h2/luci-app-photondns"
             ["nikki"]="nikkinikki-org/OpenWrt-nikki"
             ["mosdns"]="sbwml/luci-app-mosdns"
